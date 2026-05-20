@@ -1553,7 +1553,7 @@ def run_sync_logic():
         print("\n=========================================")
         print("🚀 開始針對個別成員進行全區間合併寫入...")
 
-        # === 🌟 1. 批量讀取明確的父系(Epic) Due Date (實體關聯) ===
+        # === 🌟 1. 批量讀取明確的父系(Epic) Due Date ===
         explicit_parent_due_map = {}
         if SETTINGS.get("inherit_parent_due"):
             parent_keys_to_fetch = set()
@@ -1579,7 +1579,7 @@ def run_sync_logic():
                                     explicit_parent_due_map[pi['key']] = {'due': due, 'summary': fields.get('summary', 'Unknown'), 'key': pi['key']}
                     except: pass
 
-        # === 🌟 2. 批量讀取故事(Story)的 Due Date (單向狀態機視覺排序) ===
+        # === 🌟 2. 批量讀取故事(Story)的 Due Date ===
         story_due_map = {}
         fetched_projects = set()
 
@@ -1794,7 +1794,11 @@ def run_sync_logic():
             update_res = requests.put(url, json=payload, auth=ADMIN_AUTH, headers={"Content-Type": "application/json"})
             if update_res.status_code == 200:
                 notice_text = "🔇已啟動靜默更新" if SETTINGS.get("minor_edit") else "🔊已發送公開通知"
-                sync_message = f"🎉 同步完成！\n本次共更新了 {total_logs_written} 筆任務紀錄至 Confluence。\n目標頁面：{target_title}"
+                
+                # 🌟 【關鍵修改：在這裡動態生成 Confluence 頁面的網址連結】
+                page_url = f"{JIRA_URL}/wiki/pages/viewpage.action?pageId={page_id}"
+                sync_message = f"🎉 同步完成！\n本次共更新了 {total_logs_written} 筆任務紀錄至 Confluence。\n目標頁面：{target_title}\n網址連結：{page_url}"
+                
                 print(f"🎉 大功告成！已成功更新 {total_logs_written} 筆任務紀錄 ({notice_text})！")
             else:
                 sync_status = "error"
@@ -1816,7 +1820,7 @@ def run_sync_logic():
         time_str = f"{mins}m{secs}s" if mins > 0 else f"{secs}s"
         print(f"\n🏁 任務結束。 (總耗時: {time_str})")
         
-       # ====================================================
+        # ====================================================
         # 🌟 核心修改：判斷是否由 LINE 觸發，並發送推播回報 (包含管理員副本)
         # ====================================================
         line_user_id = os.environ.get("LINE_USER_ID", "")
@@ -1825,7 +1829,6 @@ def run_sync_logic():
         admin_user_id = "U2e9b79c2f71cb2a3db62e5d75254270c"  # 固定管理員 ID
         
         if line_user_id and line_access_token:
-            # 優先採用真實暱稱顯示
             user_label = line_display_name if line_display_name else f"ID: {line_user_id}"
             print(f"📱 準備發送執行結果推播給同仁: {user_label}")
             
@@ -1837,7 +1840,7 @@ def run_sync_logic():
                 line_bot_api.push_message(line_user_id, TextSendMessage(text=final_push_message))
                 print("✅ 同仁推播回報發送成功！")
                 
-                # 2. 🌟 額外追加：若觸發者不是您本人，偷偷發送一個完整的對話成果副本給您
+                # 2. 額外追加：若觸發者不是您本人，偷偷發送一個完整的對話成果副本給您
                 if line_user_id != admin_user_id:
                     admin_copy_message = f"🕵️ 任務完工報告副本\n執行同仁：{user_label}\n\n發送給該同仁的完工內容如下：\n--------------------\n{final_push_message}"
                     line_bot_api.push_message(admin_user_id, TextSendMessage(text=admin_copy_message))
