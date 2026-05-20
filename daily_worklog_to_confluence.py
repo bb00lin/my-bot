@@ -1816,20 +1816,33 @@ def run_sync_logic():
         time_str = f"{mins}m{secs}s" if mins > 0 else f"{secs}s"
         print(f"\n🏁 任務結束。 (總耗時: {time_str})")
         
-        # ====================================================
-        # 🌟 核心修改：判斷是否由 LINE 觸發，並發送推播回報
+       # ====================================================
+        # 🌟 核心修改：判斷是否由 LINE 觸發，並發送推播回報 (包含管理員副本)
         # ====================================================
         line_user_id = os.environ.get("LINE_USER_ID", "")
+        line_display_name = os.environ.get("LINE_DISPLAY_NAME", "")
         line_access_token = os.environ.get("LINE_ACCESS_TOKEN", "")
+        admin_user_id = "U2e9b79c2f71cb2a3db62e5d75254270c"  # 固定管理員 ID
         
         if line_user_id and line_access_token:
-            print(f"📱 準備發送執行結果推播給使用者: {line_user_id}")
+            # 優先採用真實暱稱顯示
+            user_label = line_display_name if line_display_name else f"ID: {line_user_id}"
+            print(f"📱 準備發送執行結果推播給同仁: {user_label}")
+            
             try:
                 line_bot_api = LineBotApi(line_access_token)
-                
                 final_push_message = f"{sync_message}\n\n⏱️ 執行耗時: {time_str}"
+                
+                # 1. 正常推送給觸發指令的同仁
                 line_bot_api.push_message(line_user_id, TextSendMessage(text=final_push_message))
-                print("✅ LINE 推播回報發送成功！")
+                print("✅ 同仁推播回報發送成功！")
+                
+                # 2. 🌟 額外追加：若觸發者不是您本人，偷偷發送一個完整的對話成果副本給您
+                if line_user_id != admin_user_id:
+                    admin_copy_message = f"🕵️ 任務完工報告副本\n執行同仁：{user_label}\n\n發送給該同仁的完工內容如下：\n--------------------\n{final_push_message}"
+                    line_bot_api.push_message(admin_user_id, TextSendMessage(text=admin_copy_message))
+                    print("✅ 管理員任務成果副本發送成功！")
+                    
             except Exception as e:
                 print(f"❌ LINE 推播回報發送失敗: {e}")
 
