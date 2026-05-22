@@ -36,21 +36,54 @@ def get_gspread_client():
         return None
 
 def sync_to_sheets(data_list):
-    """將結果寫入 '法人精選監測' Google Sheets 並回傳該報表的實際真實網址"""
+    """將結果寫入 '法人精選監測' 報表，具備自動擴增行數與高亮最新資料功能"""
     try:
         client = get_gspread_client()
         if not client: return None
         spreadsheet = client.open("法人精選監測")
         sheet = spreadsheet.get_worksheet(0)
-        sheet.append_rows(data_list)
+        
+        # 1. 偵測空間並自動擴增行數
+        current_rows = sheet.row_count       # 目前總格子行數
+        existing_data_rows = len(sheet.get_all_values())  # 目前已有資料的最後一行
+        needed_rows = existing_data_rows + len(data_list)
+        
+        if needed_rows >= current_rows:
+            add_rows = len(data_list) + 100  # 多預留 100 行安全空間
+            sheet.add_rows(add_rows)
+            print(f"⚡ 偵測到報表容量不足！已自動擴增 {add_rows} 行空間。")
+
+        # 2. 清除整張報表舊資料的顏色 (重置為白色)
+        # 建立大範圍格式重置（假設上限處理到 10000 行，A到K欄）
+        sheet.format(f"A2:K{max(2000, current_rows)}", {
+            "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
+        })
+        print("🔄 已清除舊資料的高亮顏色")
+
+        # 3. 寫入新數據
+        sheet.append_rows(data_list, value_input_option='USER_ENTERED')
         print(f"✅ 成功同步 {len(data_list)} 筆數據至 '法人精選監測'")
-        return spreadsheet.url  # 🚀 自動動態獲取真實網址
+
+        # 4. 將剛剛寫入的最後這幾行標示為黃色
+        start_row = existing_data_rows + 1
+        end_row = existing_data_rows + len(data_list)
+        
+        sheet.format(f"A{start_row}:K{end_row}", {
+            "backgroundColor": {
+                "red": 1.0, 
+                "green": 0.98,  # 柔和暖黃色，舒服不刺眼
+                "blue": 0.82
+            }
+        })
+        print(f"💛 已將最新的第 {start_row} 到 {end_row} 行標示為高亮黃色！")
+        
+        return spreadsheet.url  
     except Exception as e:
-        print(f"⚠️ '法人精選監測' 同步失敗: {e}")
+        print(f"⚠️ '法人精選監測' 同步與高亮失敗: {e}")
         return None
 
 def update_watch_list_sheet(recommended_stocks, name_map):
-    """將推薦標的匯入 'WATCH_LIST'、檢查所有現有持股名稱，並回傳真實網址"""
+    """將推薦標的匯入 'WATCH_LIST'、自動檢查容量並更新"""
     try:
         client = get_gspread_client()
         if not client: return None
@@ -64,8 +97,10 @@ def update_watch_list_sheet(recommended_stocks, name_map):
         # 1. 讀取現有資料並檢查名稱
         all_values = sheet.get_all_values()
         existing_ids = set()
+        existing_data_rows = len(all_values)
+        current_rows = sheet.row_count
         
-        print(f"🔍 正在檢查 {len(all_values)-1} 筆現有庫存名稱...")
+        print(f"🔍 正在檢查 {existing_data_rows-1} 筆現有庫存名稱...")
         
         for idx, row in enumerate(all_values):
             if idx == 0: continue 
@@ -102,6 +137,11 @@ def update_watch_list_sheet(recommended_stocks, name_map):
                     existing_ids.add(sid)
 
             if new_rows:
+                # 檢查容量是否足夠
+                if existing_data_rows + len(new_rows) >= current_rows:
+                    sheet.add_rows(len(new_rows) + 50)
+                    print("⚡ WATCH_LIST 容量不足，已自動擴增空間。")
+                    
                 sheet.append_rows(new_rows, value_input_option='RAW')
                 print(f"✅ 已將 {len(new_rows)} 檔新標的加入 'WATCH_LIST'")
             else:
@@ -109,7 +149,7 @@ def update_watch_list_sheet(recommended_stocks, name_map):
         else:
             print("ℹ️ 今日無新推薦標的。")
             
-        return spreadsheet.url  # 🚀 自動動態獲取真實網址
+        return spreadsheet.url  
 
     except Exception as e:
         print(f"⚠️ 更新 WATCH_LIST 失敗: {e}")
@@ -261,7 +301,6 @@ def main():
 
         time.sleep(0.4)
 
-    # 🚀 重點升級：讓函式直接動態獲取雲端試算表的真實 URL
     monitor_sheet_url = "無法獲取連結"
     if sheet_results:
         real_url = sync_to_sheets(sheet_results)
@@ -271,7 +310,6 @@ def main():
     real_watch_url = update_watch_list_sheet(watch_list_candidates, name_map)
     if real_watch_url: watch_list_url = real_watch_url
 
-    # 3. 簡化 LINE 推播 (現在帶有 100% 正確的真實連結)
     tw_date = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d')
 
     msg = (f"🔍 【{tw_date} 法人雙軌策略掃描完成】\n\n"
@@ -281,7 +319,7 @@ def main():
            f"📋 點擊查看最新 WATCH_LIST：\n{watch_list_url}")
     
     send_line(msg)
-    print("✅ 完美動態連結版 LINE 策略通知已發送！")
+    print("✅ 自動偵測擴增 + 舊資料去色 + 最新資料高亮黃色完成！LINE 通知已發送！")
 
 if __name__ == "__main__":
     main()
