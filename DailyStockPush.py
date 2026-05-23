@@ -126,7 +126,7 @@ def record_token_usage(response):
     except: pass
 
 # ==========================================
-# Google Sheets 核心資料庫 (具備防爆、去色與高亮)
+# Google Sheets 核心資料庫 (防爆、去色與高亮)
 # ==========================================
 def get_gspread_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -284,7 +284,7 @@ def get_limit_up_potential(r):
     return score, " | ".join(reasons)
 
 # ==========================================
-# AI 策略層
+# 4. AI 策略層 (個股診斷)
 # ==========================================
 def get_gemini_strategy(data):
     if not HAS_GENAI or not AI_CLIENT: return "AI 服務暫停"
@@ -305,33 +305,69 @@ def get_gemini_strategy(data):
             continue
     return "AI 連線忙碌中"
 
+# ==========================================
+# 5. ✨ 全域戰略報告生成器 (魂歸操盤手 Prompt 大升級)
+# ==========================================
 def generate_and_save_summary(data_list, report_time_str):
     if not HAS_GENAI or not AI_CLIENT: return "本次報告未包含 AI 總結"
-    inventory_txt = "".join([f"- {r['name']}({r['id']}) | 現價:{r['p']}\n" for r in data_list if r['is_hold']])
-    watchlist_txt = "".join([f"- {r['name']}({r['id']}) | 現價:{r['p']}\n" for r in data_list if not r['is_hold']])
-    # 請將 generate_and_save_summary 內部的 prompt 替換為這段：
-    prompt = f"""
-    角色：你是頂尖、冷酷且極度重視風險管理的台股短線主力量化操盤手。
-    任務：根據今日傳入的自選股與庫存數據，撰寫一份極度精準、不說廢話、一針見血的【戰略總結報告】。
     
-    【重要數據參考 (內含今日各均線價格)】
+    inventory_txt = ""
+    watchlist_txt = ""
+    golden_candidates = ""
+    limit_up_candidates_txt = ""
+    
+    for r in data_list:
+        try:
+            stock_info = (
+                f"- {r['name']}({r['id']}) | 現價:{r['p']} | 分數:{r['score']} | "
+                f"MA5:{r['ma5']} | MA10:{r['ma10']} | MA20:{r['ma20']} | MA60:{r['ma60']} | "
+                f"日漲跌:{r['d1']:.2%} | 外資:{r['fs']}d 投信:{r['ss']}d | 量能:{r['vol_str']} | "
+                f"均線訊號:{r['ma_alert']} | AI個股策略:{r['ai_strategy'][:40]}...\n"
+            )
+            if r['is_hold']: inventory_txt += stock_info
+            else: watchlist_txt += stock_info
+                
+            if r['is_golden']:
+                golden_candidates += f"- {r['name']}({r['id']}): {r['golden_msg']} (防守MA20: {r['ma20']})\n"
+
+            limit_up_score, limit_up_reason = get_limit_up_potential(r)
+            if limit_up_score >= 60:
+                limit_up_candidates_txt += (
+                    f"- {r['name']}({r['id']}): 潛力分{limit_up_score} ({limit_up_reason}) | "
+                    f"籌碼:投信{r['ss']}天 外資{r['fs']}天\n"
+                )
+        except: continue
+
+    if not golden_candidates: golden_candidates = "今日無符合標準之標的。"
+    if not limit_up_candidates_txt: limit_up_candidates_txt = "今日無明顯漲停特徵股。"
+
+    # 🚀 注入靈魂的硬核操盤指令
+    prompt = f"""
+    角色：你是頂尖、冷酷、毫無客套、極度重視風險管理的台股短線量化操盤總監。
+    任務：根據今日傳入的自選股與庫存技術數據，撰寫一份極度精準、不說廢話、直擊要害的【戰略總結報告】。
+    
+    【最新市場數據庫 (內含今日各均線價格)】
+    【庫存倉位】:
     {inventory_txt}
+    
+    【自選觀察】:
     {watchlist_txt}
     
-    【🔥 今日黃金進場公式篩選結果】
+    【🔥 今日黃金進場公式篩選】
     {golden_candidates}
     
     【🚀 今日漲停潛力股獵殺名單】
     {limit_up_candidates_txt}
     
-    【嚴格撰寫指令 —— 違反則扣薪】：
-    1. 拋棄所有空泛的財經新聞廢話（例如不需要寫美股震盪、通膨、美聯儲等大盤新聞）。
-    2. 第一章【庫存持股總體檢】請直接對比個股的現價與 MA 均線。只要建議「防守、減碼、停損」，括號內必須寫出具體的「均線名稱與價格數字」，例如：「台郡建議防守MA5(57.28)，跌破則考慮減碼」。
-    3. 必須將個股分類為：[較弱勢個股(跌破均線/庫存虧損)]、[持平個股]、[相對強勢個股]。
-    4. 第二章【觀察名單潛力股】從名單中挑選 3 檔，參考傳入的 MA5 或 MA20 數值，給出具體的「回測進場價金額」與「波段防守價金額」。
-    5. 第四章【黃金進場公式】與第五章【🎯 漲停潛力股獵殺】必須像之前一樣列出完整的個股清單、潛力分數，並結合你內建的半導體/電子產業知識庫，補上其熱門題材（如 CoWoS、MLCC、矽智財等）與短期爆發力評估。
+    【❌ 鐵律：若違反以下指令直接扣薪 ❌】：
+    1. 絕對拋棄所有空泛的投顧或財經大盤新聞廢話（不需要寫美股震盪、通膨、美聯儲、昨日回顧等拖台錢字眼）。
+    2. 第一章【庫存持股總體檢】必須將持股分類為：[較弱勢個股(跌破均線/庫存虧損)]、[持平個股]、[相對強勢個股]。
+    3. 承上，只要提到任何操作建議（如防守、減碼、停損、了結），大括號內部必須融合具體的「均線名稱與價格數字」，例如：「台郡建議防守MA5(57.28)，跌破則考慮減碼」。絕對不允許寫無實質金額的空話！
+    4. 第二章【觀察名單潛力股】從觀察名單中挑選評分最高的前 3 檔點評。必須參考傳入的 MA5 或 MA20 實際數值，給出極具體、有數字的「進場埋伏價格」與「波段防守價格」。
+    5. 第四章【黃金進場公式】完整列出上述達標的清單與對應的 MA20 停損金額。
+    6. 第五章【🎯 漲停潛力股獵殺】針對上述名單，結合你內建的台股電子半導體知識庫，補上其精準的「熱門題材」（如 CoWoS 設備、被動元件、高階封測、MCU、矽智財等）並客觀評估短期爆發力。
 
-    請嚴格依照以下格式與章節輸出（繁體中文）：
+    請嚴格依照以下格式與五個章節直接輸出，不准加任何前言或結尾廢話（繁體中文）：
     ### 1. 庫存持股總體檢
     ### 2. 觀察名單潛力股
     ### 3. 總結操作建議
@@ -349,6 +385,9 @@ def generate_and_save_summary(data_list, report_time_str):
             continue
     return "AI 生成總結報告失敗"
 
+# ==========================================
+# 6. 行情數據抓取核心
+# ==========================================
 def fetch_pro_metrics(stock_data):
     sid, is_hold, cost = stock_data['sid'], stock_data['is_hold'], stock_data['cost']
     stock, full_id = get_tw_stock(sid)
@@ -379,7 +418,15 @@ def fetch_pro_metrics(stock_data):
         pure_id = ''.join(filter(str.isdigit, sid))
         fs, ss = get_streak_only(pure_id) 
 
+        # 計算評分
         score = 5
+        if (info.get('profitMargins', 0) or 0) > 0: score += 1
+        if curr_p > ma60: score += 1
+        if 0.02 < raw_yield < 0.12: score += 1
+        if 45 < clean_rsi < 68: score += 1
+        if fs >= 2 or ss >= 1: score += 1
+        if is_golden: score += 3
+
         stock_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/ETF"))
         market_label = '櫃' if '.TWO' in full_id else '市'
 
@@ -419,7 +466,7 @@ def send_email(subject, body):
     except Exception as e: print(f"❌ 郵件失敗: {e}")
 
 # ==========================================
-# 8. 主程式執行區塊 (已修正安全字串替換)
+# 8. 主程式執行區塊 (已修復舊版本 Python 字串相容性)
 # ==========================================
 def main():
     current_time = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
@@ -438,10 +485,12 @@ def main():
         time.sleep(10) 
         summary_text = generate_and_save_summary(results_line, current_time)
         
+        # 🚀 寫入主報表數據（包含防爆、去色、黃色高亮）
         report_sheet_url = sync_to_sheets(results_sheet)
         if not report_sheet_url:
             report_sheet_url = "無法動態獲取連結，請至 Google Drive 查閱"
         
+        # 🚀 寫入獨立日期分頁 (AI 戰略報告)
         try:
             client = get_gspread_client()
             if client:
@@ -463,7 +512,7 @@ def main():
         twd_cost = calculate_twd_cost()
         line_quota_report = get_line_quota_report()
 
-        # ✨ 【重要修正點】：先在外部處理換行替換，完全避開 f-string 的大括號內部反斜線限制
+        # ✨ 重要修正點：在外部完成替換，100% 避開舊版 Python 的 f-string 內部反斜線報錯
         line_quota_html = line_quota_report.replace('\n', '<br>')
 
         # HTML 版成本報告 (Email)
@@ -498,7 +547,7 @@ def main():
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
             payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": line_msg}]}
             requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)
-            print("✅ 語法完全修復之終極版戰報推播發送成功！")
+            print("✅ 終極修復、絕不爆錯之全新持股體檢戰報已全面部署成功！")
 
 if __name__ == "__main__":
     main()
