@@ -306,7 +306,7 @@ def get_gemini_strategy(data):
     return "AI 連線忙碌中"
 
 # ==========================================
-# 5. ✨ 全域戰略報告生成器 (魂歸操盤手且包含APP智慧單獵殺設定)
+# 5. ✨ 全域戰略報告生成器 (自動防禦暴衝股，生成智慧單策略)
 # ==========================================
 def generate_and_save_summary(data_list, report_time_str):
     if not HAS_GENAI or not AI_CLIENT: return "本次報告未包含 AI 總結"
@@ -341,7 +341,6 @@ def generate_and_save_summary(data_list, report_time_str):
     if not golden_candidates: golden_candidates = "今日無符合標準之標的。"
     if not limit_up_candidates_txt: limit_up_candidates_txt = "今日無明顯漲停特徵股。"
 
-    # 🚀 注入靈魂的硬核操盤指令 + 智慧單下單精確設定自動化
     prompt = f"""
     角色：你是頂尖、冷酷、毫無客套、極度重視風險管理的台股短線量化操盤總監。
     任務：根據今日傳入的自選股與庫存技術數據，撰寫一份極度精準、不說廢話、直擊要害的【戰略總結報告】。
@@ -360,14 +359,16 @@ def generate_and_save_summary(data_list, report_time_str):
     {limit_up_candidates_txt}
     
     【❌ 鐵律：若違反以下指令直接扣薪 ❌】：
-    1. 絕對拋棄所有空泛的投顧或財經大盤新聞廢話（不需要寫美股震盪、通膨、美聯儲、昨日回顧等拖台錢字眼）。
-    2. 第一章【庫存持股總體檢】必須將持股分類為：[較弱勢個股(跌破均線/庫存虧損)]、[持平個股]、[相對強勢個股]。
-    3. 承上，只要提到任何操作建議（如防守、減碼、停損、了結），大括號內部必須融合具體的「均線名稱與價格數字」，例如：「台郡建議防守MA5(57.28)，跌破則考慮減碼」。絕對不允許寫無實質金額的空話！
-    4. 第二章【觀察名單潛力股】從觀察名單中挑選評分最高的前 3 檔點評。必須參考傳入的 MA5 或 MA20 實際數值，給出極具體、有數字的「進場埋伏價格」與「波段防守價格」。
-    5. 第四章【黃金進場公式】完整列出上述達標的清單與對應的 MA20 停損金額。
-    6. 第五章【🎯 漲停潛力股獵殺】針對上述名單，結合你內建的台股電子半導體知識庫，補上其精準的「熱門題材」（如 CoWoS 設備、被動元件、高階封測、MCU、矽智財等）並客觀評估短期爆發力。
-    7. ✨【精準對齊下單要求】：請交叉比對「第二章點名的觀察名單潛力股」與「第四章黃金公式清單」，找出同時符合這兩者的交集個股。在報告的最尾端，新增一個全新的【★ 明日券商 APP 智慧單下單精確設定】區塊。如果今日無交集個股，就從第二章或第四章挑選分數、位階最優者執行。
-
+    1. 絕對拋棄所有空泛的投顧或財經大盤新聞廢話（不需要寫美股震盪、通膨、美聯儲、昨日回顧等字眼）。
+    2. 第一章【庫存持股總體檢】必須將持股分類為：[較弱勢個股(跌破均線/庫存虧損)]、[持平個股]、[相對強勢個股]。且只要提到建議（如防守、減碼、停損），必須融合具體的均線價格數字。
+    3. 第二章【觀察名單潛力股】從觀察名單中挑選評分最高的前 3 檔點評，給出具體金額。
+    4. 第四章【黃金進場公式】完整列出上述達標的清單與對應的 MA20 停損金額。
+    5. 第五章【🎯 漲停潛力股獵殺】列出潛力特徵股與題材。
+    6. ✨【🔥 終極智慧單防禦機制】：
+       請深度交叉比對「第二章潛力股」與「第四章黃金公式清單」。
+       在最後生成【★ 明日券商 APP 智慧單下單精確設定】時，你必須**嚴格過濾掉今日漲幅過高、甚至已經鎖漲停（日漲跌大於 5%）的極端暴衝股**！
+       你只能挑選**「股價剛好回測至 MA5 附近、今天日漲跌在 0% ~ 4% 之間、安全且尚未起飛」**的 1~2 檔作為狙擊目標，並為其計算出精準的低調佈局指令。如果沒有完全符合的個股，就從黃金公式中挑選離 MA20 最近、防守肉最少者執行。
+    
     請嚴格依照以下格式與六個章節直接輸出，不准加任何前言或結尾廢話（繁體中文）：
     ### 1. 庫存持股總體檢
     ### 2. 觀察名單潛力股
@@ -377,8 +378,8 @@ def generate_and_save_summary(data_list, report_time_str):
     
     ### ★ 明日券商 APP 智慧單下單精確設定
     (必須包含以下精細格式欄位：
-    🎯 獵殺目標：股票名稱 (代號)
-    - 為什麼選它：(寫出交叉符合原因與熱門題材)
+    🎯 獵殺目標：股票名稱 (代號) - ✨ 特選：低位階尚未起飛股
+    - 為什麼選它：(說明它同時符合公式與潛力股，且今日位階安全、剛好回測MA5防線、避開了高檔漲停追高風險)
     - 精確進場區間：AI 總監提示「回測 MA5 (XX元) 附近進場」
     - APP 實戰設定步驟：
       1. 開啟手機券商 APP，切換到「條件單」或「智慧單」功能（選擇長效期智慧單）。
@@ -478,7 +479,7 @@ def send_email(subject, body):
     except Exception as e: print(f"❌ 郵件失敗: {e}")
 
 # ==========================================
-# 8. 主程式執行區塊 (全面升級：圖2高質感逐行橫向合併排版)
+# 8. 主程式執行區塊 (✨圖2高質感排版與LINE費用額度診斷)
 # ==========================================
 def main():
     current_time = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
@@ -502,7 +503,7 @@ def main():
         if not report_sheet_url:
             report_sheet_url = "無法動態獲取連結，請至 Google Drive 查閱"
         
-        # 🚀 【✨核心重構區：完全複製圖2高質感排版規格】
+        # 🚀 完美美化：橫向合併 A~E 欄，完美貼合圖2高質感閱讀寬度
         try:
             client = get_gspread_client()
             if client:
@@ -526,8 +527,8 @@ def main():
                                 "sheetId": s_sheet.id,
                                 "startRowIndex": row_idx - 1,
                                 "endRowIndex": row_idx,
-                                "startColumnIndex": 0,  # A 欄
-                                "endColumnIndex": 5     # E 欄 (意即合併 A, B, C, D, E)
+                                "startColumnIndex": 0,
+                                "endColumnIndex": 5
                             },
                             "mergeType": "MERGE_ROWS"
                         }
@@ -536,7 +537,7 @@ def main():
                 if body_requests:
                     spreadsheet.batch_update({"requests": body_requests})
                 
-                # 3. 格式微調與美化設定 (自動換行、垂直靠上、微軟正黑體)
+                # 3. 格式微調與美化設定
                 s_sheet.format("A1:E150", {
                     "wrapStrategy": "WRAP",
                     "verticalAlignment": "TOP",
@@ -546,20 +547,20 @@ def main():
                     }
                 })
                 
-                # 4. 固定 A 到 E 每欄欄寬為 140 像素，展開成 700 像素的完美寬度
+                # 4. 固定 A 到 E 每欄欄寬為 140 像素
                 for col in range(1, 6):
                     s_sheet.set_column_width(gspread.utils.get_column_letter(col), 140)
                     
-                print(f"✅ 獨立日期戰略分頁 [{current_time}] 已完美套用圖2規格生成！")
+                print(f"✅ 獨立日期戰略分頁 [{current_time}] 已套用圖2規格生成！")
         except Exception as e: 
-            print(f"⚠️ 建立圖2排版戰略分頁失敗: {e}")
+            print(f"⚠️ 建立戰略分頁失敗: {e}")
 
         # 計算費用與獲取 LINE 免費額度
         twd_cost = calculate_twd_cost()
         line_quota_report = get_line_quota_report()
         line_quota_html = line_quota_report.replace('\n', '<br>')
 
-        # HTML 版成本報告 (Email)
+        # HTML 版成本報告
         cost_report_html = f"""
         <div style='background-color:#fff9db; padding:15px; border-left:5px solid #fcc419; margin-top:20px; font-family:sans-serif;'>
             <h3 style='margin-top:0; color:#e67e22;'>💰 今日運作成本診斷報告</h3>
@@ -581,7 +582,7 @@ def main():
         if LINE_ACCESS_TOKEN:
             line_msg = (
                 f"📊 【{current_time} 戰略報告已更新】\n\n"
-                f"今日自選股診斷已執行完畢，全新「明日券商 APP 智慧單下單精確設定」與圖2規格美化分頁已成功產生！\n\n"
+                f"今日自選股診斷已執行完畢，全新「智慧單自動下單設定」與圖2規格美化分頁已成功產生！\n\n"
                 f"🔗 點擊直達雲端主報表：\n{report_sheet_url}\n\n"
                 f"── 💸 今日 AI 帳單明細 ──\n"
                 f"🔹 總消耗 Tokens：{GLOBAL_TOKEN_BILLING['total_tokens']:,}\n"
@@ -591,7 +592,7 @@ def main():
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
             payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": line_msg}]}
             requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)
-            print("✅ 終極完全體持股體檢戰報已全面部署成功！")
+            print("✅ 完美排版＋下單智慧單生成版部署成功！")
 
 if __name__ == "__main__":
     main()
