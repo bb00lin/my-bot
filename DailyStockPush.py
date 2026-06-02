@@ -34,7 +34,7 @@ MODEL_CANDIDATES = [
 HAS_GENAI = False
 AI_CLIENT = None
 
-# 全局 Token 統計記帳本
+# 全局 Token 統計記帳本（統計單次代碼工作的所有累積消耗）
 GLOBAL_TOKEN_BILLING = {
     "prompt_tokens": 0,
     "completion_tokens": 0,
@@ -43,13 +43,13 @@ GLOBAL_TOKEN_BILLING = {
 }
 
 # ==========================================
-# [啟動檢查] AI 自我診斷
+# [啟動檢查] AI 自我診斷（已加入詳細錯誤排查）
 # ==========================================
 def check_ai_health():
     global HAS_GENAI, AI_CLIENT
     print("🤖 正在進行 AI 模型連線測試 (使用 google-genai SDK)...")
     if not GEMINI_API_KEY:
-        print("⚠️ 警告: 未設定 GEMINI_API_KEY，將跳過 AI 功能。")
+        print("⚠️ 警告: 未設定 GEMINI_API_KEY 環境變數，將跳過 AI 功能。")
         HAS_GENAI = False
         return
 
@@ -59,11 +59,14 @@ def check_ai_health():
             try:
                 response = client.models.generate_content(model=model_name, contents="Hi")
                 if response and response.text:
-                    print(f"✅ AI 測試成功！將使用模型: {model_name}")
+                    print(f"✅ AI 測試成功！本次代碼工作將使用模型: {model_name}")
                     HAS_GENAI = True
                     AI_CLIENT = client
                     return
-            except: continue
+            except Exception as model_err: 
+                # 關鍵修正：不再隱藏錯誤，直接印出為什麼連不上 Gemini
+                print(f"❌ 模型 {model_name} 測試失敗，原因: {model_err}")
+                continue
         print("❌ 失敗: 所有候選模型皆無法連線。將以「無 AI 模式」繼續執行。")
         HAS_GENAI = False
     except Exception as e:
@@ -179,6 +182,35 @@ def sync_to_sheets(data_list):
     except Exception as e: 
         print(f"⚠️ 主報表同步與高亮修正失敗: {e}")
         return None
+
+def log_execution_cost_to_sheets(spreadsheet, current_time, twd_cost):
+    """【新功能】將每一次整套代碼執行的總 Token 與費用統計寫入獨立的對帳分頁"""
+    try:
+        try:
+            cost_sheet = spreadsheet.worksheet("Token與費用統計")
+        except:
+            # 若獨立分頁不存在，則新建並初始化欄位標頭
+            cost_sheet = spreadsheet.add_worksheet(title="Token與費用統計", rows=1000, cols=6)
+            cost_sheet.append_row(['執行時間', 'AI 呼叫總次數', '輸入 Token (Prompt)', '輸出 Token (Completion)', '總 Token 消耗', '預估台幣費用 (TWD)'])
+            cost_sheet.format("A1:F1", {
+                "textFormat": {"bold": True},
+                "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9},
+                "horizontalAlignment": "CENTER"
+            })
+        
+        # 追加寫入本次自動化任務的成本明細
+        row_data = [
+            current_time,
+            GLOBAL_TOKEN_BILLING["api_calls"],
+            GLOBAL_TOKEN_BILLING["prompt_tokens"],
+            GLOBAL_TOKEN_BILLING["completion_tokens"],
+            GLOBAL_TOKEN_BILLING["total_tokens"],
+            f"NT$ {twd_cost} 元"
+        ]
+        cost_sheet.append_row(row_data, value_input_option='USER_ENTERED')
+        print("📊 本次工作總計花費已成功記錄至試算表 [Token與費用統計] 獨立分頁！")
+    except Exception as e:
+        print(f"⚠️ 記錄工作成本至試算表失敗: {e}")
 
 def get_global_stock_info():
     try:
@@ -318,7 +350,6 @@ def generate_and_save_summary(data_list, report_time_str):
     
     for r in data_list:
         try:
-            # 🚀 升級傳遞給 AI 的字串：加入實際成交張數，提供絕對數據顆粒度
             stock_info = (
                 f"- {r['name']}({r['id']}) | 現價:{r['p']} | 分數:{r['score']} | "
                 f"MA5:{r['ma5']} | MA10:{r['ma10']} | MA20:{r['ma20']} | MA60:{r['ma60']} | "
@@ -343,7 +374,6 @@ def generate_and_save_summary(data_list, report_time_str):
     if not golden_candidates: golden_candidates = "今日無符合標準之標的。"
     if not limit_up_candidates_txt: limit_up_candidates_txt = "今日無明顯漲停特徵股。"
 
-    # 🚀 動態雙模板、防截斷、無名單回報升級版
     prompt = f"""
     角色：你是頂尖、冷酷、極度重視風險管理的台股短線量化操盤總監。
     任務：根據今日技術數據，撰寫極度精準、具備絕對數據顆粒度(必須寫出實際價格與張數)的【戰略總結報告】。
@@ -361,10 +391,10 @@ def generate_and_save_summary(data_list, report_time_str):
     【❌ 鐵律：違反直接扣薪 ❌】：
     1. 第一章至第五章請維持精簡，分類明確，必須包含具體價格數字。
     2. ✨【★ 明日券商 APP 智慧單下單精確設定】：
-       深度交叉比對第二章潛力股與第四章黃金公式清單。挑選 1~2 檔最優標的。
-       你必須依據個股位階，將其分類為以下兩種等級，並【一字不漏地】套用對應的專屬模板！絕對禁止標題截斷或自創空泛字眼！
-       若今日盤面無符合「低位階」或「中位階」的標的，請強制輸出：「今日無符合 [該等級] 之標的，嚴格控管資金風險。」
-       
+        深度交叉比對第二章潛力股與第四章黃金公式清單。挑選 1~2 檔最優標的。
+        你必須依據個股位階，將其分類為以下兩種等級，並【一字不漏地】套用對應的專屬模板！絕對禁止標題截斷或自創空泛字眼！
+        若今日盤面無符合「低位階」或「中位階」的標的，請強制輸出：「今日無符合 [該等級] 之標的，嚴格控管資金風險。」
+        
     ==========【等級 A 專屬模板】==========
     (適用條件：MA5 貼近 MA20，日漲跌 0%~3%，量縮)
     🎯 獵殺目標：[股票名稱] (代號) - ✨ 特選：低位階尚未起飛股
@@ -390,7 +420,7 @@ def generate_and_save_summary(data_list, report_time_str):
     - APP 實戰設定步驟：
       1. 開啟手機券商 APP，選擇「長效期智慧單」。
       2. 觸發條件設定：當股價小於或等於 [實際MA5 + 0.1元] 時。
-      3. 下單動作設定：以「限價 [實際MA5元]」買入 1 張。
+      3. 下單動作設定：以「限價 [實際MA5元]」買入 1 張.
       4. 終極安全帶（停損設定）：智慧停損單設定「當股價收盤跌破 MA20: [實際MA20元]」立刻市價砍出。
 
     請嚴格依照六個章節直接輸出（繁體中文）：
@@ -446,7 +476,6 @@ def fetch_pro_metrics(stock_data):
         pure_id = ''.join(filter(str.isdigit, sid))
         fs, ss = get_streak_only(pure_id) 
 
-        # 計算評分
         score = 5
         if (info.get('profitMargins', 0) or 0) > 0: score += 1
         if curr_p > ma60: score += 1
@@ -458,7 +487,6 @@ def fetch_pro_metrics(stock_data):
         stock_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/ETF"))
         market_label = '櫃' if '.TWO' in full_id else '市'
 
-        # 🚀 升級傳遞變數：加入 v_today 與 v_ma5 (換算為張數)
         vol_today_lots = int(curr_vol / 1000) if not pd.isna(curr_vol) else 0
         vol_ma5_lots = int(df_hist['Volume'].iloc[-6:-1].mean() / 1000) if not pd.isna(df_hist['Volume'].iloc[-6:-1].mean()) else 0
 
@@ -500,7 +528,7 @@ def send_email(subject, body):
     except Exception as e: print(f"❌ 郵件失敗: {e}")
 
 # ==========================================
-# 8. 主程式執行區塊 (✨圖2高質感逐行橫向合併排版)
+# 8. 主程式執行區塊
 # ==========================================
 def main():
     current_time = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
@@ -524,11 +552,29 @@ def main():
         if not report_sheet_url:
             report_sheet_url = "無法動態獲取連結，請至 Google Drive 查閱"
         
-        # 🚀 完美美化：橫向合併 A~E 欄，完美貼合圖2高質感閱讀寬度
+        # 計算總費用與獲取 LINE 免費額度
+        twd_cost = calculate_twd_cost()
+        line_quota_report = get_line_quota_report()
+
+        # 🚀 【新功能】在終端機（Console）直接列印精美的成本結算表
+        print("\n==========================================")
+        print("💰 本次代碼工作 AI 運作成本結算報告")
+        print(f"🔹 執行時間：{current_time}")
+        print(f"🔹 AI API 呼叫總次數：{GLOBAL_TOKEN_BILLING['api_calls']} 次")
+        print(f"🔹 輸入 Token (Prompt)：{GLOBAL_TOKEN_BILLING['prompt_tokens']:,}")
+        print(f"🔹 輸出 Token (Completion)：{GLOBAL_TOKEN_BILLING['completion_tokens']:,}")
+        print(f"🔹 總消耗 Tokens：{GLOBAL_TOKEN_BILLING['total_tokens']:,}")
+        print(f"🔹 預估本次花費台幣：NT$ {twd_cost} 元")
+        print("==========================================\n")
+        
         try:
             client = get_gspread_client()
             if client:
                 spreadsheet = client.open("全能金流診斷報表")
+                
+                # 🚀 【新功能】同步將每期總帳單寫入獨立的分頁進行歷史存檔
+                log_execution_cost_to_sheets(spreadsheet, current_time, twd_cost)
+                
                 try:
                     s_sheet = spreadsheet.worksheet(current_time)
                     s_sheet.clear()
@@ -557,7 +603,7 @@ def main():
                         }
                     })
                 
-                # [任務 B]: ✨ 修正版 - 透過官方 API 設定 A 到 E 欄 (index 0~5) 寬度為 140 像素
+                # [任務 B]: 修正版 - 透過官方 API 設定 A 到 E 欄寬度為 140 像素
                 body_requests.append({
                     "updateDimensionProperties": {
                         "range": {
@@ -591,10 +637,6 @@ def main():
         except Exception as e: 
             print(f"⚠️ 建立圖2排版戰略分頁失敗: {e}")
 
-        # 計算費用與獲取 LINE 免費額度
-        twd_cost = calculate_twd_cost()
-        line_quota_report = get_line_quota_report()
-        
         # ✨ 在外部安全替換換行符號
         line_quota_html = line_quota_report.replace('\n', '<br>')
 
@@ -616,7 +658,7 @@ def main():
         email_body = f"<html><body><h2>📊 {current_time} 全能金流診斷</h2><pre style='font-family:sans-serif; white-space:pre-wrap;'>{summary_text}</pre><hr>{cost_report_html}</body></html>"
         send_email(f"[{current_time}] 台股 AI 戰報 (附成本與 LINE 額度診斷)", email_body)
 
-        # 發送 LINE 精簡通知
+        # 發送 LINE 通知
         if LINE_ACCESS_TOKEN:
             line_msg = (
                 f"📊 【{current_time} 戰略報告已更新】\n\n"
