@@ -23,11 +23,13 @@ MAIL_RECEIVERS = ['bb00lin@gmail.com']
 MAIL_USER = os.environ.get('MAIL_USERNAME')
 MAIL_PASS = os.environ.get('MAIL_PASSWORD')
 
-# 優先使用高額度正式版模型
+# ==========================================
+# 修正後的正確模型清單 (完美對應 google-genai SDK 規範)
+# ==========================================
 MODEL_CANDIDATES = [
-    "gemini-2.0-flash",      # 🚀 首選
-    "gemini-1.5-flash",      
-    "gemini-1.5-pro",
+    "gemini-2.5-flash",      # 🚀 目前最新、速度最快的首選模型
+    "gemini-2.0-flash",      # 修正：部分環境需寫成完整代號（如 "gemini-2.0-flash-exp" 或由新版自動對接）
+    "gemini-1.5-flash",
 ]
 
 # 全域變數
