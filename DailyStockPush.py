@@ -143,7 +143,6 @@ def get_gspread_client():
     except: return None
 
 def sync_to_sheets(data_list):
-    """將結果寫入主報表，具備自動擴增、全面去色與最新資料高亮黃色功能"""
     try:
         client = get_gspread_client()
         if not client: return None
@@ -186,7 +185,7 @@ def log_execution_cost_to_sheets(spreadsheet, current_time, twd_cost):
             cost_sheet = spreadsheet.worksheet("Token與費用統計")
         except:
             cost_sheet = spreadsheet.add_worksheet(title="Token與費用統計", rows=1000, cols=6)
-            cost_sheet.append_row(['執行時間', 'AI 呼召總次數', '輸入 Token (Prompt)', '輸出 Token (Completion)', '總 Token 消耗', '預估台幣費用 (TWD)'])
+            cost_sheet.append_row(['執行時間', 'AI 呼叫總次數', '輸入 Token (Prompt)', '輸出 Token (Completion)', '總 Token 消耗', '預估台幣費用 (TWD)'])
             cost_sheet.format("A1:F1", {
                 "textFormat": {"bold": True},
                 "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9},
@@ -206,15 +205,31 @@ def log_execution_cost_to_sheets(spreadsheet, current_time, twd_cost):
     except Exception as e:
         print(f"⚠️ 記錄工作成本至試算表失敗: {e}")
 
+# ==========================================
+# 🚀 產業字典：加入 3 次重試機制，防範 FinMind 斷線
+# ==========================================
 def get_global_stock_info():
-    try:
-        dl = DataLoader()
-        df = dl.taiwan_stock_info()
-        return {str(row['stock_id']): (row['stock_name'], row['industry_category']) for _, row in df.iterrows()}
-    except: return {}
+    """帶有 3 次強力重試機制的產業字典抓取器，避免 FinMind 罷工導致產業變空白"""
+    dl = DataLoader()
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            df = dl.taiwan_stock_info()
+            if df is not None and not df.empty:
+                return {str(row['stock_id']): (row['stock_name'], row['industry_category']) for _, row in df.iterrows()}
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"⏳ 產業字典獲取失敗，2秒後重試... ({attempt+1}/{max_retries})")
+                time.sleep(2)
+            else:
+                print("⚠️ 無法獲取產業字典，將暫時使用預設值。")
+    return {}
 
 STOCK_INFO_MAP = get_global_stock_info()
 
+# ==========================================
+# 🚀 讀取名單：直接從 Google Sheets 抓取真實中文名稱
+# ==========================================
 def get_watch_list_from_sheet():
     try:
         client = get_gspread_client()
@@ -225,14 +240,21 @@ def get_watch_list_from_sheet():
         watch_data = []
         for row in records:
             raw_sid = str(row.get('股票代號', '')).strip()
+            
+            # ✨ 關鍵修改：優先從試算表直接抓名字，防範 API 抓不到
+            raw_name = str(row.get('股票名稱', row.get('名稱', ''))).strip()
+            
             if not raw_sid: continue
             if raw_sid.isdigit():
                 sid = "00" + raw_sid if len(raw_sid) == 3 else (raw_sid.zfill(4) if len(raw_sid) < 4 else raw_sid)
             else: sid = raw_sid
+            
             is_hold = str(row.get('我的庫存倉位', '')).strip().upper() == 'Y'
             cost = row.get('平均成本', 0)
             if cost == '': cost = 0
-            watch_data.append({'sid': sid, 'is_hold': is_hold, 'cost': float(cost)})
+            
+            # ✨ 將抓到的名字包裝進去傳遞給後續流程
+            watch_data.append({'sid': sid, 'name': raw_name, 'is_hold': is_hold, 'cost': float(cost)})
         return watch_data
     except: return []
 
@@ -416,7 +438,7 @@ def generate_and_save_summary(data_list, report_time_str):
     - 📊 進場邏輯深度解析 (黃金公式大數據拆解)：
       【流動性檢視】：今日實際成交量為 [實際今日張數]張 (為5日均量 [實際5日均量]張的倍數放大)。(若低於500張需在此加註冷門股風險提示)
       1. 【多頭發散攻勢】：現價 ([實際現價]元) 呈現 MA5 ([實際MA5]元) > MA10 ([實際MA10]元) > MA20 ([實際MA20]元) 的強勢發散排列，動能強勁。
-      2. 【主力追價表態】：今日成交量放大至 [實際今日張數]張，資金持續推推推升滾量。
+      2. 【主力追價表態】：今日成交量放大至 [實際今日張數]張，資金持續推升滾量。
       3. 【位階波段評估】：今日上漲 [實際日漲跌幅]%，代表股價已成功脫離底部並展開主升段衝刺，但尚未進入超買過熱區。
     - 精確進場區間：AI 總監提示「回測 MA5 ([實際MA5]元) 附近進場」
     - APP 實戰設定步驟：
@@ -449,7 +471,8 @@ def generate_and_save_summary(data_list, report_time_str):
 # 6. 行情數據抓取核心
 # ==========================================
 def fetch_pro_metrics(stock_data):
-    sid, is_hold, cost = stock_data['sid'], stock_data['is_hold'], stock_data['cost']
+    # ✨ 關鍵修改：從傳進來的 stock_data 中解包出我們優先獲取的真實股票名稱
+    sid, passed_name, is_hold, cost = stock_data['sid'], stock_data['name'], stock_data['is_hold'], stock_data['cost']
     stock, full_id = get_tw_stock(sid)
     if not stock: return None
     try:
@@ -486,14 +509,17 @@ def fetch_pro_metrics(stock_data):
         if fs >= 2 or ss >= 1: score += 1
         if is_golden: score += 3
 
-        stock_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/ETF"))
+        # ✨ 關鍵防呆機制：如果 Google Sheets 抓下來的名字是空的，才會退回去用字典的名字
+        map_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/ETF"))
+        final_stock_name = passed_name if passed_name else map_name
+        
         market_label = '櫃' if '.TWO' in full_id else '市'
 
         vol_today_lots = int(curr_vol / 1000) if not pd.isna(curr_vol) else 0
         vol_ma5_lots = int(df_hist['Volume'].iloc[-6:-1].mean() / 1000) if not pd.isna(df_hist['Volume'].iloc[-6:-1].mean()) else 0
 
         res = {
-            "id": f"{sid}{market_label}", "name": stock_name, "score": score, "rsi": clean_rsi, "industry": industry,
+            "id": f"{sid}{market_label}", "name": final_stock_name, "score": score, "rsi": clean_rsi, "industry": industry,
             "vol_r": round(vol_ratio, 1), "p": round(curr_p, 2), "yield": raw_yield, "amt_t": round(today_amount, 1),
             "d1": (curr_p / df_hist['Close'].iloc[-2]) - 1, "d5": (curr_p / df_hist['Close'].iloc[-6]) - 1,
             "m1": (curr_p / df_hist['Close'].iloc[-21]) - 1, "m6": (curr_p / df_hist['Close'].iloc[-121]) - 1,
@@ -504,17 +530,17 @@ def fetch_pro_metrics(stock_data):
             "v_ma5": vol_ma5_lots
         }
         
-        # 🚀【全新功能】動態量化風險診斷評級
+        # 🚀【動態量化風險診斷評級】
         if bias_60 > 15 or clean_rsi > 75: res["risk"] = "🚨高檔過熱"
         elif curr_p < ma20: res["risk"] = "⚠️破線警戒"
         else: res["risk"] = "🟢正常"
             
-        # 🚀【全新功能】動態量化波段趨勢評級
+        # 🚀【動態量化波段趨勢評級】
         if ma5 > ma10 and ma10 > ma20 and ma20 > ma60: res["trend"] = "📈強勢多頭"
         elif curr_p < ma60: res["trend"] = "📉空頭修正"
         else: res["trend"] = "☁️區間震盪"
             
-        # 🚀【全新功能】動態量化操盤訊號提示
+        # 🚀【動態量化操盤訊號提示】
         if is_golden: res["hint"] = "🔥黃金買點"
         elif score >= 8: res["hint"] = "🚀強勢進攻"
         else: res["hint"] = "👀持續追蹤"
@@ -557,7 +583,6 @@ def main():
         res = fetch_pro_metrics(stock_data)
         if res:
             results_line.append(res)
-            # 這裡完美對接全新的動態 [risk, trend, hint] 數據
             results_sheet.append([current_time, res['id'], res['name'], "📦庫存" if res['is_hold'] else "👀觀察", res['score'], res['rsi'], res['industry'], res['bias_str'], res['vol_str'], res['fs'], res['ss'], res['p'], res['yield'], res['amt_t'], res['d1'], res['d5'], res['m1'], res['m6'], res['risk'], res['trend'], res['hint'], res['ai_strategy']])
         if idx < len(watch_data_list) - 1: time.sleep(2.0)
     
