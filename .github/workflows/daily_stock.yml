@@ -1,9 +1,8 @@
 name: DailyStockPush
 
 on:
-  schedule:
-    - cron: '30 09 * * 1-5' # 台北時間 17:30 (UTC 09:30)
-  workflow_dispatch:
+  # ⚡ [已暫時取消] 移除 cron 定時排程，全面改由 DailyStockBot 串接執行，防範重複觸發浪費 Token
+  workflow_dispatch: # 🚀 保留手動觸發功能，方便您隨時在 GitHub 網頁上手動測試執行
 
 permissions:
   contents: read
@@ -20,7 +19,7 @@ jobs:
         uses: actions/setup-python@v5 # 🚀 升級至 v5
         with:
           python-version: '3.10'
-          cache: 'pip' # ⚡ [全新優化] 開啟 pip 快取，下次執行時免重新下載相同套件，大幅縮短執行時間
+          cache: 'pip' # ⚡ [全新優化] 開啟 pip 快取，免重新下載相同套件，大幅縮短執行時間
 
       - name: Install Dependencies
         run: |
