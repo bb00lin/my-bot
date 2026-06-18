@@ -171,11 +171,8 @@ def get_watch_list_from_sheet():
         return watch_data
     except: return []
 
-# ==========================================
-# 🚀 重大修正：將 20 天區間吸籌精算引擎移植到 Push 腳本中
-# ==========================================
 def get_inst_stats(sid_clean):
-    """一次獲取外資投信連續買超天數，以及近20天合計買超天數"""
+    """獲取外資投信連續買超天數，以及近20天合計買超天數"""
     try:
         dl = DataLoader()
         start = (datetime.date.today() - datetime.timedelta(days=35)).strftime('%Y-%m-%d')
@@ -199,9 +196,9 @@ def get_inst_stats(sid_clean):
     except: return 0, 0, 0, 0
 
 def get_vol_status_str(ratio):
-    if ratio > 1.8: return f"🔥爆量({ratio:.1f}x)"
-    elif ratio > 1.2: return f"📈溫和({ratio:.1f}x)"
-    elif ratio < 0.7: return f"⚠️縮量({ratio:.1f}x)"
+    if ratio >= 2.0: return f"🔥突破爆量({ratio:.1f}x)"
+    elif ratio > 1.2: return f"📈溫和出量({ratio:.1f}x)"
+    elif ratio < 0.7: return f"⚠️窒息量縮({ratio:.1f}x)"
     else: return f"☁️量平({ratio:.1f}x)"
 
 def check_ma_status(p, ma5, ma10, ma20, ma60):
@@ -260,12 +257,15 @@ def get_gemini_strategy(data):
     return "AI 連線忙碌中"
 
 # ==========================================
-# 5. ✨ 全域戰略報告生成器 (自動三階分級 + 絕對數據顆粒度)
+# 5. ✨ 全域戰略報告生成器 (新增初升段矩陣)
 # ==========================================
 def generate_and_save_summary(data_list, report_time_str):
     if not HAS_GENAI or not AI_CLIENT: return "本次報告未包含 AI 總結"
     
-    inventory_txt, watchlist_txt, golden_candidates, limit_up_candidates_txt, long_term_candidates_txt = "", "", "", "", ""
+    inventory_txt, watchlist_txt = "", ""
+    golden_candidates, limit_up_candidates_txt, long_term_candidates_txt = "", "", ""
+    # 新增三個提早卡位清單
+    incubation_txt, first_golden_cross_txt, intraday_breakout_txt = "", "", ""
     
     for r in data_list:
         try:
@@ -273,24 +273,37 @@ def generate_and_save_summary(data_list, report_time_str):
                 f"- {r['name']}({r['id']}) | 現價:{r['p']} | 分數:{r['score']} | "
                 f"MA5:{r['ma5']} | MA10:{r['ma10']} | MA20:{r['ma20']} | MA60:{r['ma60']} | "
                 f"日漲跌:{r['d1']:.2%} | 外資:{r['fs']}d 投信:{r['ss']}d | "
-                f"今日成交量:{r.get('v_today',0)}張 (5日均量:{r.get('v_ma5',0)}張, {r['vol_str']}) | "
-                f"均線訊號:{r['ma_alert']} | AI策略:{r['ai_strategy'][:40]}...\n"
+                f"今日量:{r.get('v_today',0)}張 (量比:{r['vol_r']}x) | 訊號:{r['ma_alert']}\n"
             )
             if r['is_hold']: inventory_txt += stock_info
             else: watchlist_txt += stock_info
                 
             if r['is_golden']: golden_candidates += f"- {r['name']}({r['id']}): {r['golden_msg']} (防守MA20: {r['ma20']})\n"
             
-            # 🚀 抓取長線飆股並獨立分類
+            # 🚀 舊有強勢模型
             if r.get('is_long_term'):
-                long_term_candidates_txt += f"- {r['name']}({r['id']}): 🌊主力大週期鎖籌碼 (量{r['vol_r']}x/季線上揚) | 防守MA20: {r['ma20']}\n"
-
+                long_term_candidates_txt += f"- {r['name']}({r['id']}): 🌊主力大週期鎖籌碼 (量{r['vol_r']}x) | 防守: {r['ma20']}\n"
             limit_up_score, limit_up_reason = get_limit_up_potential(r)
             if limit_up_score >= 60:
-                limit_up_candidates_txt += f"- {r['name']}({r['id']}): 潛力分{limit_up_score} ({limit_up_reason}) | 籌碼:投信{r['ss']}天 外資{r['fs']}天\n"
+                limit_up_candidates_txt += f"- {r['name']}({r['id']}): 潛力分{limit_up_score} ({limit_up_reason}) | 外:{r['fs']}d 投:{r['ss']}d\n"
+
+            # 🌱 新引擎 A：底部主力潛伏區 (近月線、連買、溫和放量)
+            if r.get('is_incubation'):
+                incubation_txt += f"- {r['name']}({r['id']}): 籌碼連買(外{r['fs']}投{r['ss']}) | 乖離月線僅{r['bias_20_str']} | 量能溫和{r['vol_r']}x\n"
+                
+            # ✨ 新引擎 B：均線剛黃金交叉的第一根 (MA5 剛穿 MA20)
+            if r.get('is_first_golden_cross'):
+                first_golden_cross_txt += f"- {r['name']}({r['id']}): MA5({r['ma5']}) 剛穿越 MA20({r['ma20']}) 第一天 | 今日漲幅:{r['d1']:.2%}\n"
+                
+            # ⚡ 新引擎 C：盤中/提早爆發雷達 (漲幅 > 2.5%, 預估量 > 2倍)
+            if r.get('is_intraday_breakout'):
+                intraday_breakout_txt += f"- {r['name']}({r['id']}): ⚡動能異動！漲幅達{r['d1']:.2%} | 量暴增{r['vol_r']}x\n"
+
         except: continue
 
-    if not golden_candidates: golden_candidates = "今日無符合標準之標的。"
+    if not incubation_txt: incubation_txt = "今日無符合 [底部潛伏] 標準之標的。"
+    if not first_golden_cross_txt: first_golden_cross_txt = "今日無符合 [黃金交叉第一根] 之標的。"
+    if not intraday_breakout_txt: intraday_breakout_txt = "今日無符合 [動能爆發] 之標的。"
     if not limit_up_candidates_txt: limit_up_candidates_txt = "今日無明顯漲停特徵股。"
     if not long_term_candidates_txt: long_term_candidates_txt = "今日無符合長線主升浪標準之標的。"
 
@@ -299,22 +312,25 @@ def generate_and_save_summary(data_list, report_time_str):
     任務：根據今日技術數據，撰寫極度精準、具備絕對數據顆粒度(必須寫出實際價格與張數)的【戰略總結報告】。
     
     【最新市場數據庫】
-    【庫存倉位】:
-    {inventory_txt}
-    【自選觀察】:
-    {watchlist_txt}
+    【🌱 引擎A：底部主力潛伏區 (提早1~3天卡位)】
+    {incubation_txt}
+    【✨ 引擎B：均線初升第一根 (MA5剛上穿MA20)】
+    {first_golden_cross_txt}
+    【⚡ 引擎C：動能即時爆發雷達】
+    {intraday_breakout_txt}
     【🔥 今日黃金進場公式篩選】
     {golden_candidates}
-    【🚀 今日漲停潛力股獵殺名單】
+    【🚀 今日漲停潛力股獵殺 (已經噴發之強勢股)】
     {limit_up_candidates_txt}
-    【🌊 長線主升浪大妖股名單】
+    【🌊 長線主升浪大妖股】
     {long_term_candidates_txt}
     
     【❌ 鐵律：違反直接扣薪 ❌】：
-    1. 前六章請維持精簡，分類明確，必須包含具體價格數字。
+    1. 報告前段請依序精簡列出上述各大分類的標的狀態。
     2. ✨【★ 明日券商 APP 智慧單下單精確設定】：
-       深度交叉比對黃金公式與長線飆股清單。挑選 1~3 檔最優標的。
-       你必須依據個股位階，將其嚴格分類為 A、B、C 三種等級，並必須維持這三個等級標題的輸出！
+       深度交叉比對上述所有引擎數據。
+       【優先級】：AI 總監必須「優先」從【引擎A】、【引擎B】、【引擎C】與【黃金公式】中挑選 A 與 B 級標的，以達到「買在起漲點」的目的；已噴發的強勢股盡量安排在 C 級。
+       你必須依據個股位階，將挑選出的標的嚴格分類為 A、B、C 三種等級，並必須維持這三個等級標題的輸出！
        
        【🚨 關鍵流動性與防漏空缺鐵律】：
        - 必須在下單設定內明確標示【今日實際成交量】。
@@ -322,53 +338,32 @@ def generate_and_save_summary(data_list, report_time_str):
          "⚠️ [冷門股防範：注意此股今日成交量低於500張，流動性極差，請嚴格控管資金或改採零股少量試單！]"
        - 若某等級無符合標的，請在該等級標題下方強制輸出一行宣示文字：「今日無符合 [該等級名稱] 之推薦標的，嚴格控管資金風險。」
        
-    ==========【等級 A 專屬模板】==========
-    (適用：MA5 貼近 MA20，日漲跌 0%~3%，量縮)
+    ==========【等級 A 專屬模板 (底部潛伏/黃金交叉)】==========
     🎯 獵殺目標：[股票名稱] (代號) - ✨ 特選：低位階尚未起飛股 [今日成交: XX張] 
-    - 📊 進場邏輯深度解析 (黃金公式大數據拆解)：
+    - 📊 進場邏輯深度解析：
       【流動性檢視】：今日成交量為 [張數]張 (對比5日均量 [張數]張)。
-      1. 【大趨勢保護】：現價位於 MA20 與 MA60 之上。
-      2. 【洗盤籌碼沉澱】：今日量縮，賣壓枯竭。
-      3. 【位階安全防禦】：今日剛好回測至 MA5 ([MA5]元) 附近。
-    - 精確進場區間：AI 總監提示「回測 MA5 ([MA5]元) 附近進場」
-    - APP 實戰設定步驟：
+      1. 【提早卡位】：符合引擎A或B，主力剛開始吸籌或均線剛交叉。
+      2. 【位階安全防禦】：股價距離月線極近，防守容易。
+    - 實戰設定步驟：
       1. 觸發條件設定：當股價小於或等於 [MA5 + 0.1] 時。
-      2. 下單動作設定：以「限價 [MA5]」買入 1 張。
+      2. 下單動作設定：以「限價 [MA5]」買入。
       3. 終極安全帶（停損設定）：收盤跌破 MA20: [MA20] 立刻砍出。
       
-    ==========【等級 B 專屬模板】==========
-    (適用：MA5>MA10>MA20，日漲跌 3%~6%，溫和出量)
-    🎯 獵殺目標：[股票名稱] (代號) - ⚡ 衝刺：中位階主升起飛股 [今日成交: XX張] 
+    ==========【等級 B 專屬模板 (動能爆發/回測買點)】==========
+    🎯 獵殺目標：[股票名稱] (代號) - ⚡ 衝刺：初升段爆發/量縮回測股 [今日成交: XX張] 
     - 📊 進場邏輯深度解析：
       【流動性檢視】：今日成交量放大至 [張數]張。
-      1. 【多頭發散攻勢】：均線強勢發散排列。
-      2. 【主力追價表態】：資金持續推升滾量。
-      3. 【位階波段評估】：股價脫離底部展開主升段，尚未過熱。
-    - 精確進場區間：AI 總監提示「回測 MA5 ([MA5]元) 附近進場」
-    - APP 實戰設定步驟：(同上，以MA5買進，跌破MA20停損)
+      1. 【動能確認】：符合引擎C 或 黃金公式，有明確攻擊量或完美的量縮回測。
+    - 實戰設定步驟：(同上，以MA5買進，跌破MA20停損)
 
-    ==========【等級 C 專屬模板 (🚀全新長線戰略)】==========
-    (適用：符合第 6 章長線主升浪大妖股名單。無懼指標過熱)
+    ==========【等級 C 專屬模板 (長線/強勢追擊)】==========
     🎯 獵殺目標：[股票名稱] (代號) - 🌊 破浪：長線主升浪大妖股 [今日成交: XX張] 
     - 📊 進場邏輯深度解析：
       【流動性檢視】：今日成交量為 [張數]張。
-      1. 【大人鎖碼護航】：過去20日法人強勢吸籌，季線(MA60)明確向上發散。
-      2. 【無懼指標過熱】：長線資金進駐，屬於波段大妖股體質，忽略短線 KD/RSI 鈍化。
-    - 精確進場區間：AI 總監提示「強勢股不輕易拉回，逢 5MA ([MA5]元) 即可勇敢分批或零股進場」
-    - APP 實戰設定步驟：
-      1. 觸發條件設定：當股價小於或等於 [MA5 + 0.5] 時。
-      2. 下單動作設定：以「限價 [MA5]」買入 1 張 (或設定零股金額)。
-      3. 終極安全帶（停損設定）：長線大波段防守，收盤跌破 MA20: [MA20] 停損。
+      1. 【大人鎖碼護航】：過去20日法人強勢吸籌，季線向上發散，無視短線指標過熱。
+    - 實戰設定步驟：(強勢股不輕易拉回，逢 MA5 或 MA10 買進，跌破 MA20 停損)
 
-    請嚴格依照七個章節直接輸出（繁體中文）：
-    ### 1. 庫存持股總體檢
-    ### 2. 觀察名單潛力股
-    ### 3. 總結操作建議
-    ### 4. 黃金進場公式 (每日必檢)
-    ### 5. 🎯 漲停潛力股獵殺 (AI預測)
-    ### 6. 🌊 長線主升浪大妖股 (無懼過熱)
-    ### ★ 明日券商 APP 智慧單下單精確設定
-    (必須同時保留 A、B、C 三個等級之標題，若無標的則明示空缺文字)
+    請嚴格依照以上章節輸出（繁體中文），並保留所有特殊符號。
     """
 
     for model_name in MODEL_CANDIDATES:
@@ -393,6 +388,7 @@ def fetch_pro_metrics(stock_data):
         if len(df_hist) < 120: return None
         info = stock.info
         latest = df_hist.iloc[-1]
+        prev = df_hist.iloc[-2]
         curr_p, curr_vol = latest['Close'], latest['Volume']
         today_amount = (curr_vol * curr_p) / 100_000_000
         
@@ -400,24 +396,40 @@ def fetch_pro_metrics(stock_data):
         gain, loss = delta.where(delta > 0, 0).rolling(14).mean(), (-delta.where(delta < 0, 0)).rolling(14).mean()
         clean_rsi = round(100 - (100 / (1 + (gain.iloc[-1] / loss.iloc[-1]))), 1) if loss.iloc[-1] != 0 else 50.0
         
+        # 取得均線
         ma5 = round(df_hist['Close'].rolling(5).mean().iloc[-1], 2)
         ma10 = round(df_hist['Close'].rolling(10).mean().iloc[-1], 2)
         ma20 = round(df_hist['Close'].rolling(20).mean().iloc[-1], 2)
+        ma60 = round(df_hist['Close'].rolling(60).mean().iloc[-1], 2)
         
-        ma60_series = df_hist['Close'].rolling(60).mean()
-        ma60 = round(ma60_series.iloc[-1], 2)
-        ma60_prev = ma60_series.iloc[-2] if len(ma60_series) > 1 else ma60
+        # 昨日均線 (為了抓取黃金交叉)
+        ma5_prev = round(df_hist['Close'].rolling(5).mean().iloc[-2], 2)
+        ma20_prev = round(df_hist['Close'].rolling(20).mean().iloc[-2], 2)
+        ma60_prev = round(df_hist['Close'].rolling(60).mean().iloc[-2], 2)
         
         bias_60 = ((curr_p - ma60) / ma60) * 100
+        bias_20 = ((curr_p - ma20) / ma20) * 100
+        
         ma_alert_str = check_ma_status(curr_p, ma5, ma10, ma20, ma60)
         is_golden, golden_msg = check_golden_entry(df_hist)
         raw_yield = info.get('dividendYield', 0) or 0
         
-        vol_ratio = curr_vol / df_hist['Volume'].iloc[-6:-1].mean() if df_hist['Volume'].iloc[-6:-1].mean() > 0 else 0
+        vol_ma5_val = df_hist['Volume'].iloc[-6:-1].mean()
+        vol_ratio = curr_vol / vol_ma5_val if vol_ma5_val > 0 else 0
         pure_id = ''.join(filter(str.isdigit, sid))
         
-        # 🚀 呼叫升級版籌碼引擎，取得區間天數
+        # 籌碼引擎
         fs_streak, ss_streak, fs_days, ss_days = get_inst_stats(pure_id) 
+
+        # 🚀【新增引擎 A】底部主力潛伏區 (近月線 3%內 + 連買 + 量能溫和 1.0~1.6x)
+        is_incubation = (abs(bias_20) <= 3.0) and (fs_streak >= 3 or ss_streak >= 3) and (1.0 <= vol_ratio <= 1.6)
+        
+        # 🚀【新增引擎 B】均線初升第一根 (MA5 昨天還在 MA20 下面，今天穿上去，且收紅)
+        is_first_golden_cross = (ma5_prev <= ma20_prev) and (ma5 > ma20) and (curr_p > latest['Open'])
+        
+        # 🚀【新增引擎 C】盤中動能即時雷達 (漲幅 > 2.5% 且 量能暴增 > 2倍)
+        d1_change = (curr_p / prev['Close']) - 1
+        is_intraday_breakout = (d1_change > 0.025) and (vol_ratio > 2.0)
 
         score = 5
         if (info.get('profitMargins', 0) or 0) > 0: score += 1
@@ -425,28 +437,32 @@ def fetch_pro_metrics(stock_data):
         if 0.02 < raw_yield < 0.12: score += 1
         if 45 < clean_rsi < 68: score += 1
         if fs_streak >= 2 or ss_streak >= 1: score += 1
-        if is_golden: score += 3
+        if is_golden or is_incubation or is_first_golden_cross: score += 3
 
         map_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/ETF"))
         final_stock_name = passed_name if passed_name else map_name
         market_label = '櫃' if '.TWO' in full_id else '市'
 
         vol_today_lots = int(curr_vol / 1000) if not pd.isna(curr_vol) else 0
-        vol_ma5_lots = int(df_hist['Volume'].iloc[-6:-1].mean() / 1000) if not pd.isna(df_hist['Volume'].iloc[-6:-1].mean()) else 0
+        vol_ma5_lots = int(vol_ma5_val / 1000) if not pd.isna(vol_ma5_val) else 0
         
-        # 🚀 重新精算：這檔股票是否符合長線大妖股？
+        # 長線大妖股
         is_long_term_trend = (curr_p > ma20 and curr_p > ma60 and ma60 > ma60_prev and (fs_days + ss_days >= 12) and vol_ratio > 1.0)
 
         res = {
             "id": f"{sid}{market_label}", "name": final_stock_name, "score": score, "rsi": clean_rsi, "industry": industry,
             "vol_r": round(vol_ratio, 1), "p": round(curr_p, 2), "yield": raw_yield, "amt_t": round(today_amount, 1),
-            "d1": (curr_p / df_hist['Close'].iloc[-2]) - 1, "d5": (curr_p / df_hist['Close'].iloc[-6]) - 1,
+            "d1": d1_change, "d5": (curr_p / df_hist['Close'].iloc[-6]) - 1,
             "m1": (curr_p / df_hist['Close'].iloc[-21]) - 1, "m6": (curr_p / df_hist['Close'].iloc[-121]) - 1,
-            "is_hold": is_hold, "cost": cost, "bias_str": f"{bias_60:+.1f}%", "vol_str": get_vol_status_str(vol_ratio),
+            "is_hold": is_hold, "cost": cost, "bias_str": f"{bias_60:+.1f}%", "bias_20_str": f"{bias_20:+.1f}%",
+            "vol_str": get_vol_status_str(vol_ratio),
             "fs": fs_streak, "ss": ss_streak, "ma5": ma5, "ma10": ma10, "ma20": ma20, "ma60": ma60, "ma_alert": ma_alert_str,
             "is_golden": is_golden, "golden_msg": golden_msg,
             "v_today": vol_today_lots, "v_ma5": vol_ma5_lots,
-            "is_long_term": is_long_term_trend  # 傳遞長線標籤給 AI
+            "is_long_term": is_long_term_trend,
+            "is_incubation": is_incubation,
+            "is_first_golden_cross": is_first_golden_cross,
+            "is_intraday_breakout": is_intraday_breakout
         }
         
         if bias_60 > 15 or clean_rsi > 75: res["risk"] = "🚨高檔過熱"
@@ -459,6 +475,9 @@ def fetch_pro_metrics(stock_data):
             
         if is_long_term_trend: res["hint"] = "🌊長線起漲"
         elif is_golden: res["hint"] = "🔥黃金買點"
+        elif is_intraday_breakout: res["hint"] = "⚡動能爆發"
+        elif is_first_golden_cross: res["hint"] = "✨均線突破"
+        elif is_incubation: res["hint"] = "🌱主力潛伏"
         elif score >= 8: res["hint"] = "🚀強勢進攻"
         else: res["hint"] = "👀持續追蹤"
         
@@ -546,15 +565,15 @@ def main():
         line_quota_html = line_quota_report.replace('\n', '<br>')
         cost_report_html = f"<div style='background-color:#fff9db; padding:15px; border-left:5px solid #fcc419; margin-top:20px; font-family:sans-serif;'><h3 style='margin-top:0; color:#e67e22;'>💰 今日運作成本診斷報告</h3><p><b>【雲端主報表連結】</b><br>- 🔗 <a href='{report_sheet_url}'>點擊前往查看數據報表</a></p><p><b>【Gemini API 帳單】</b><br>- 消耗總 Tokens：<span style='color:#d9480f;'>{GLOBAL_TOKEN_BILLING['total_tokens']:,}</span><br>- 預估台幣費用：<span style='color:#c92a2a;'><b>NT$ {twd_cost} 元</b></span></p><p style='margin-bottom:0;'><b>【LINE Bot 免費額度】</b><br>{line_quota_html}</p></div>"
 
-        email_body = f"<html><body><h2>📊 {current_time} 全能金流診斷</h2><pre style='font-family:sans-serif; white-space:pre-wrap;'>{summary_text}</pre><hr>{cost_report_html}</body></html>"
-        send_email(f"[{current_time}] 台股 AI 戰報 (附成本與 LINE 額度診斷)", email_body)
+        email_body = f"<html><body><h2>📊 {current_time} 提前攔截戰略報告</h2><pre style='font-family:sans-serif; white-space:pre-wrap;'>{summary_text}</pre><hr>{cost_report_html}</body></html>"
+        send_email(f"[{current_time}] 台股 AI 初升段戰報 (附成本與 LINE 額度)", email_body)
 
         if LINE_ACCESS_TOKEN:
-            line_msg = f"📊 【{current_time} 戰略報告已更新】\n\n今日自選股診斷已執行完畢，全新「三階位階評估 + 智慧單精算」與圖2規格美化分頁已成功產生！\n\n🔗 點擊直達雲端主報表：\n{report_sheet_url}\n\n── 💸 今日 AI 帳單明細 ──\n🔹 總消耗 Tokens：{GLOBAL_TOKEN_BILLING['total_tokens']:,}\n💰 今日預估費用：NT$ {twd_cost} 元\n\n{line_quota_report}"
+            line_msg = f"📊 【{current_time} 戰略報告已更新】\n\n全新【提前攔截初升段】引擎已發動！AI 總監已為您優先從底部潛伏與剛突破的標的中進行精選。\n\n🔗 點擊直達雲端主報表：\n{report_sheet_url}\n\n── 💸 今日 AI 帳單明細 ──\n🔹 總消耗 Tokens：{GLOBAL_TOKEN_BILLING['total_tokens']:,}\n💰 今日預估費用：NT$ {twd_cost} 元\n\n{line_quota_report}"
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
             payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": line_msg}]}
             requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)
-            print("✅ 終極完全體持股體檢戰報已全面部署成功！")
+            print("✅ 終極完全體【初升段攔截雷達】已全面部署成功！")
 
 if __name__ == "__main__":
     main()
