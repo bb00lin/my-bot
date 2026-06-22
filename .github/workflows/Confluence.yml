@@ -36,7 +36,7 @@ jobs:
         CONF_PASS: ${{ secrets.CONF_PASS }}
       # 將輸出同時顯示並存檔
       run: |
-        python confluence_api.py 2>&1 | tee output.txt
+        python confluence_api2.py 2>&1 | tee output.txt
 
     # 5. 發送成功信件 [Done] (使用 Gmail 發信)
     - name: Send Success Email
