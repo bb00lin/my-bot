@@ -74,7 +74,7 @@ def create_new_report(latest_page):
 
     # 3. 處理內容 (✅ 取消日期推移，直接原封不動複製舊版內容)
     # 💡 提示：如果未來連舊內容都不想要，想產出完全空白的一頁，可以將這行改成 new_body = ""
-    new_body = latest_page['body']['storage']['value']
+    new_body = ""
     
     # 4. 建立頁面
     ancestors = []
