@@ -1,4 +1,4 @@
-name: Confluence Weekly Report
+name: Confluence Weekly Report2
 
 on:
   workflow_dispatch: # 允許手動按鈕觸發
