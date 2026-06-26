@@ -1800,6 +1800,47 @@ def run_sync_logic():
                 sync_message = f"🎉 同步完成！\n本次共更新了 {total_logs_written} 筆任務紀錄至 Confluence。\n目標頁面：{target_title}\n網址連結：{page_url}"
                 
                 print(f"🎉 大功告成！已成功更新 {total_logs_written} 筆任務紀錄 ({notice_text})！")
+
+                # ==========================================
+                # 🌟 歷史大清洗與逆向防洗版邏輯：刪除 Jira 中被自動產生的 Linked Pages
+                # ==========================================
+                # 從最終送出給 Confluence 的網頁代碼(soup)裡抓出所有 Jira 任務編號
+                jira_keys = list(set(re.findall(r'[A-Z][A-Z0-9]+-\d+', str(soup))))
+                
+                if jira_keys:
+                    print(f"\n⏳ 偵測到 {len(jira_keys)} 個 Jira 任務。")
+                    print("等待 5 秒鐘，讓 Atlassian 系統完成背景自動連動...")
+                    time.sleep(5)
+                    
+                    print("🧹 啟動歷史大清洗：正在拔除 Jira 任務底下『所有』的週報連動紀錄...")
+                    cleared_count = 0
+                    
+                    for key in jira_keys:
+                        try:
+                            # 查詢該 Jira 任務所有的 Remote Links
+                            remote_link_url = f"{JIRA_URL}/rest/api/3/issue/{key}/remotelink"
+                            r_links_resp = requests.get(remote_link_url, auth=ADMIN_AUTH, timeout=10)
+                            
+                            if r_links_resp.status_code == 200:
+                                r_links = r_links_resp.json()
+                                for link_obj in r_links:
+                                    url_val = link_obj.get('object', {}).get('url', '')
+                                    title_val = link_obj.get('object', {}).get('title', '')
+                                    
+                                    # 💡 判斷條件：只要標題包含 "WeeklyReport"，或網址包含 "WeeklyReport"，
+                                    # 或是我們剛剛更新過的新頁面 ID，就一律刪除！
+                                    if "WeeklyReport" in title_val or "WeeklyReport" in url_val or str(page_id) in url_val:
+                                        link_id = link_obj.get('id')
+                                        # 呼叫 API 刪除該筆連動紀錄
+                                        del_resp = requests.delete(f"{remote_link_url}/{link_id}", auth=ADMIN_AUTH, timeout=10)
+                                        if del_resp.status_code in [200, 204]:
+                                            cleared_count += 1
+                                            print(f"  └ 🗑️ 已刪除 [{key}] 的殘留紀錄: {title_val}")
+                        except Exception:
+                            pass
+                            
+                    print(f"\n✅ 歷史大清洗完畢！共成功拔除了 {cleared_count} 筆殘留的 Jira 週報連動紀錄。")
+
             else:
                 sync_status = "error"
                 sync_message = f"❌ 儲存至 Confluence 失敗，請檢查權限或伺服器連線。"
