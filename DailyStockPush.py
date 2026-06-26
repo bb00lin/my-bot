@@ -42,10 +42,19 @@ GLOBAL_TOKEN_BILLING = {
 }
 
 # ==========================================
-# [啟動檢查] AI 自我診斷
+# [啟動檢查] AI 自我診斷與環境變數開關
 # ==========================================
 def check_ai_health():
     global HAS_GENAI, AI_CLIENT
+    
+    # 接收 GitHub Actions 傳來的開關訊號 (預設為 true)
+    enable_ai_env = str(os.getenv("ENABLE_AI", "true")).lower() == "true"
+    
+    if not enable_ai_env:
+        print("⏸️ [系統提示] 依據手動執行設定，本次工作不啟動 AI 服務，以節省 Token。")
+        HAS_GENAI = False
+        return
+
     print("🤖 正在進行 AI 模型連線測試...")
     if not GEMINI_API_KEY:
         print("⚠️ 警告: 未設定 GEMINI_API_KEY")
@@ -157,22 +166,53 @@ def get_watch_list_from_sheet():
     try:
         client = get_gspread_client()
         if not client: return []
-        try: sheet = client.open("WATCH_LIST").worksheet("WATCH_LIST")
-        except: sheet = client.open("WATCH_LIST").get_worksheet(0)
+        
+        spreadsheet = client.open("WATCH_LIST")
+        
+        # 1. 讀取全域黑名單 (使用者手動維護)
+        blacklist = []
+        try:
+            black_sheet = spreadsheet.worksheet("AI_Blacklist")
+            blacklist = [str(val).strip() for val in black_sheet.col_values(1) if str(val).strip()]
+        except:
+            pass
+            
+        # 2. 讀取主清單
+        try: sheet = spreadsheet.worksheet("WATCH_LIST")
+        except: sheet = spreadsheet.get_worksheet(0)
+        
         watch_data = []
         for row in sheet.get_all_records():
             raw_sid = str(row.get('股票代號', '')).strip()
             raw_name = str(row.get('股票名稱', row.get('名稱', ''))).strip()
             if not raw_sid: continue
+            
+            # 處理手動關閉 AI 標籤 '#' (兼容舊功能)
+            has_hash_tag = False
+            if raw_sid.startswith('#'):
+                has_hash_tag = True
+                raw_sid = raw_sid.replace('#', '').strip()
+
             sid = "00" + raw_sid if len(raw_sid) == 3 else (raw_sid.zfill(4) if len(raw_sid) < 4 else raw_sid)
             is_hold = str(row.get('我的庫存倉位', '')).strip().upper() == 'Y'
             cost = row.get('平均成本', 0)
-            watch_data.append({'sid': sid, 'name': raw_name, 'is_hold': is_hold, 'cost': float(cost) if cost else 0})
+            
+            # 🛡️ 核心防禦：自動比對黑名單或帶有 # 號
+            skip_ai = has_hash_tag or (raw_sid in blacklist) or (sid in blacklist)
+            
+            watch_data.append({
+                'sid': sid, 
+                'name': raw_name, 
+                'is_hold': is_hold, 
+                'cost': float(cost) if cost else 0,
+                'skip_ai': skip_ai
+            })
         return watch_data
-    except: return []
+    except Exception as e: 
+        print(f"❌ 讀取 WATCH_LIST 發生錯誤: {e}")
+        return []
 
 def get_inst_stats(sid_clean):
-    """獲取外資投信連續買超天數，以及近20天合計買超天數"""
     try:
         dl = DataLoader()
         start = (datetime.date.today() - datetime.timedelta(days=35)).strftime('%Y-%m-%d')
@@ -242,7 +282,9 @@ def get_limit_up_potential(r):
     return score, " | ".join(reasons)
 
 def get_gemini_strategy(data):
+    if data.get('skip_ai'): return "⏸️ 已手動關閉 AI 分析"
     if not HAS_GENAI or not AI_CLIENT: return "AI 服務暫停"
+    
     profit_info = "目前無庫存，純觀察"
     if data['is_hold']:
         roi = ((data['p'] - data['cost']) / data['cost']) * 100
@@ -257,17 +299,18 @@ def get_gemini_strategy(data):
     return "AI 連線忙碌中"
 
 # ==========================================
-# 5. ✨ 全域戰略報告生成器 (新增初升段矩陣)
+# 5. ✨ 全域戰略報告生成器
 # ==========================================
 def generate_and_save_summary(data_list, report_time_str):
     if not HAS_GENAI or not AI_CLIENT: return "本次報告未包含 AI 總結"
     
     inventory_txt, watchlist_txt = "", ""
     golden_candidates, limit_up_candidates_txt, long_term_candidates_txt = "", "", ""
-    # 新增三個提早卡位清單
     incubation_txt, first_golden_cross_txt, intraday_breakout_txt = "", "", ""
     
     for r in data_list:
+        if r.get('skip_ai'): continue 
+        
         try:
             stock_info = (
                 f"- {r['name']}({r['id']}) | 現價:{r['p']} | 分數:{r['score']} | "
@@ -278,26 +321,23 @@ def generate_and_save_summary(data_list, report_time_str):
             if r['is_hold']: inventory_txt += stock_info
             else: watchlist_txt += stock_info
                 
-            if r['is_golden']: golden_candidates += f"- {r['name']}({r['id']}): {r['golden_msg']} (防守MA20: {r['ma20']})\n"
+            if r['is_golden']: golden_candidates += f"- {r['name']}({r['id']}) [今日成交:{r.get('v_today',0)}張]: {r['golden_msg']} (防守MA20: {r['ma20']})\n"
             
-            # 🚀 舊有強勢模型
             if r.get('is_long_term'):
-                long_term_candidates_txt += f"- {r['name']}({r['id']}): 🌊主力大週期鎖籌碼 (量{r['vol_r']}x) | 防守: {r['ma20']}\n"
+                long_term_candidates_txt += f"- {r['name']}({r['id']}) [今日成交:{r.get('v_today',0)}張]: 🌊主力大週期鎖籌碼 (量{r['vol_r']}x) | 防守: {r['ma20']}\n"
+            
             limit_up_score, limit_up_reason = get_limit_up_potential(r)
             if limit_up_score >= 60:
-                limit_up_candidates_txt += f"- {r['name']}({r['id']}): 潛力分{limit_up_score} ({limit_up_reason}) | 外:{r['fs']}d 投:{r['ss']}d\n"
+                limit_up_candidates_txt += f"- {r['name']}({r['id']}) [今日成交:{r.get('v_today',0)}張]: 潛力分{limit_up_score} ({limit_up_reason}) | 外:{r['fs']}d 投:{r['ss']}d\n"
 
-            # 🌱 新引擎 A：底部主力潛伏區 (近月線、連買、溫和放量)
             if r.get('is_incubation'):
-                incubation_txt += f"- {r['name']}({r['id']}): 籌碼連買(外{r['fs']}投{r['ss']}) | 乖離月線僅{r['bias_20_str']} | 量能溫和{r['vol_r']}x\n"
+                incubation_txt += f"- {r['name']}({r['id']}) [今日成交:{r.get('v_today',0)}張]: 籌碼連買(外{r['fs']}投{r['ss']}) | 乖離月線僅{r['bias_20_str']} | 量能溫和{r['vol_r']}x\n"
                 
-            # ✨ 新引擎 B：均線剛黃金交叉的第一根 (MA5 剛穿 MA20)
             if r.get('is_first_golden_cross'):
-                first_golden_cross_txt += f"- {r['name']}({r['id']}): MA5({r['ma5']}) 剛穿越 MA20({r['ma20']}) 第一天 | 今日漲幅:{r['d1']:.2%}\n"
+                first_golden_cross_txt += f"- {r['name']}({r['id']}) [今日成交:{r.get('v_today',0)}張]: MA5({r['ma5']}) 剛穿越 MA20({r['ma20']}) 第一天 | 今日漲幅:{r['d1']:.2%}\n"
                 
-            # ⚡ 新引擎 C：盤中/提早爆發雷達 (漲幅 > 2.5%, 預估量 > 2倍)
             if r.get('is_intraday_breakout'):
-                intraday_breakout_txt += f"- {r['name']}({r['id']}): ⚡動能異動！漲幅達{r['d1']:.2%} | 量暴增{r['vol_r']}x\n"
+                intraday_breakout_txt += f"- {r['name']}({r['id']}) [今日成交:{r.get('v_today',0)}張]: ⚡動能異動！漲幅達{r['d1']:.2%} | 量暴增{r['vol_r']}x\n"
 
         except: continue
 
@@ -328,16 +368,16 @@ def generate_and_save_summary(data_list, report_time_str):
     【❌ 鐵律：違反直接扣薪 ❌】：
     1. 報告前段請依序精簡列出上述各大分類的標的狀態。
     2. ✨【★ 明日券商 APP 智慧單下單精確設定】：
-       深度交叉比對上述所有引擎數據。
-       【優先級】：AI 總監必須「優先」從【引擎A】、【引擎B】、【引擎C】與【黃金公式】中挑選 A 與 B 級標的，以達到「買在起漲點」的目的；已噴發的強勢股盡量安排在 C 級。
-       你必須依據個股位階，將挑選出的標的嚴格分類為 A、B、C 三種等級，並必須維持這三個等級標題的輸出！
-       
-       【🚨 關鍵流動性與防漏空缺鐵律】：
-       - 必須在下單設定內明確標示【今日實際成交量】。
-       - 如果推薦的股票今日成交量【小於 500 張】，必須在標題一字不漏強制加上：
-         "⚠️ [冷門股防範：注意此股今日成交量低於500張，流動性極差，請嚴格控管資金或改採零股少量試單！]"
-       - 若某等級無符合標的，請在該等級標題下方強制輸出一行宣示文字：「今日無符合 [該等級名稱] 之推薦標的，嚴格控管資金風險。」
-       
+        深度交叉比對上述所有引擎數據。
+        【優先級】：AI 總監必須「優先」從【引擎A】、【引擎B】、【引擎C】與【黃金公式】中挑選 A 與 B 級標的，以達到「買在起漲點」的目的；已噴發的強勢股盡量安排在 C 級。
+        你必須依據個股位階，將挑選出的標的嚴格分類為 A、B、C 三種等級，並必須維持這三個等級標題的輸出！
+        
+        【🚨 關鍵流動性與防漏空缺鐵律】：
+        - 必須在下單設定內明確標示【今日實際成交量】。
+        - 如果推薦的股票今日成交量【小於 500 張】，必須在標題一字不漏強制加上：
+          "⚠️ [冷門股防範：注意此股今日成交量低於500張，流動性極差，請嚴格控管資金或改採零股少量試單！]"
+        - 若某等級無符合標的，請在該等級標題下方強制輸出一行宣示文字：「今日無符合 [該等級名稱] 之推薦標的，嚴格控管資金風險。」
+        
     ==========【等級 A 專屬模板 (底部潛伏/黃金交叉)】==========
     🎯 獵殺目標：[股票名稱] (代號) - ✨ 特選：低位階尚未起飛股 [今日成交: XX張] 
     - 📊 進場邏輯深度解析：
@@ -402,7 +442,7 @@ def fetch_pro_metrics(stock_data):
         ma20 = round(df_hist['Close'].rolling(20).mean().iloc[-1], 2)
         ma60 = round(df_hist['Close'].rolling(60).mean().iloc[-1], 2)
         
-        # 昨日均線 (為了抓取黃金交叉)
+        # 昨日均線
         ma5_prev = round(df_hist['Close'].rolling(5).mean().iloc[-2], 2)
         ma20_prev = round(df_hist['Close'].rolling(20).mean().iloc[-2], 2)
         ma60_prev = round(df_hist['Close'].rolling(60).mean().iloc[-2], 2)
@@ -421,13 +461,13 @@ def fetch_pro_metrics(stock_data):
         # 籌碼引擎
         fs_streak, ss_streak, fs_days, ss_days = get_inst_stats(pure_id) 
 
-        # 🚀【新增引擎 A】底部主力潛伏區 (近月線 3%內 + 連買 + 量能溫和 1.0~1.6x)
+        # 🚀【新增引擎 A】底部主力潛伏區
         is_incubation = (abs(bias_20) <= 3.0) and (fs_streak >= 3 or ss_streak >= 3) and (1.0 <= vol_ratio <= 1.6)
         
-        # 🚀【新增引擎 B】均線初升第一根 (MA5 昨天還在 MA20 下面，今天穿上去，且收紅)
+        # 🚀【新增引擎 B】均線初升第一根
         is_first_golden_cross = (ma5_prev <= ma20_prev) and (ma5 > ma20) and (curr_p > latest['Open'])
         
-        # 🚀【新增引擎 C】盤中動能即時雷達 (漲幅 > 2.5% 且 量能暴增 > 2倍)
+        # 🚀【新增引擎 C】盤中動能即時雷達
         d1_change = (curr_p / prev['Close']) - 1
         is_intraday_breakout = (d1_change > 0.025) and (vol_ratio > 2.0)
 
@@ -439,7 +479,10 @@ def fetch_pro_metrics(stock_data):
         if fs_streak >= 2 or ss_streak >= 1: score += 1
         if is_golden or is_incubation or is_first_golden_cross: score += 3
 
+        # 加入 yfinance 備用產業資料，防止 FinMind 失效
         map_name, industry = STOCK_INFO_MAP.get(str(sid), (sid, "其他/ETF"))
+        if not industry or industry == "其他/ETF":
+            industry = info.get('sector', info.get('industry', '其他/ETF'))
         final_stock_name = passed_name if passed_name else map_name
         market_label = '櫃' if '.TWO' in full_id else '市'
 
@@ -462,7 +505,8 @@ def fetch_pro_metrics(stock_data):
             "is_long_term": is_long_term_trend,
             "is_incubation": is_incubation,
             "is_first_golden_cross": is_first_golden_cross,
-            "is_intraday_breakout": is_intraday_breakout
+            "is_intraday_breakout": is_intraday_breakout,
+            "skip_ai": stock_data.get('skip_ai', False)
         }
         
         if bias_60 > 15 or clean_rsi > 75: res["risk"] = "🚨高檔過熱"
