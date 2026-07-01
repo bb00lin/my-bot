@@ -1340,7 +1340,7 @@ def _append_pending_tasks(soup, container, pending_in_progress, pending_waiting,
     p_spacer.append(soup.new_tag("br"))
     container.append(p_spacer)
 
-def run_clear_logic():
+ddef run_clear_logic():
     try:
         api_endpoint = f"{JIRA_URL}/wiki/rest/api/content"
         selected_dates = get_selected_dates()
@@ -1360,7 +1360,7 @@ def run_clear_logic():
         
         page_needs_update = False
 
-        # 🌟 核心修改：定位 `#Worklog` 與 `#Worklog End` 的文字錨點
+        # 🌟 定位 `#Worklog` 與 `#Worklog End` 的文字錨點
         start_marker = soup.find(string=re.compile(r'#Worklog\s*$'))
         end_marker = soup.find(string=re.compile(r'#Worklog End\s*$'))
 
@@ -1407,20 +1407,26 @@ def run_clear_logic():
 
     except Exception as e: print(f"\n❌ 程式發生意外錯誤: {e}")
 
+
 def run_sync_logic():
     start_time = time.time()
     
+    # 用來記錄最終要推播給 LINE 的結果
     sync_status = "success"
     sync_message = ""
     total_logs_written = 0
     
+    # ✅ 動態判斷 GitHub 執行環境並決定標籤
     is_github_actions = os.environ.get("GITHUB_ACTIONS") == "true"
     github_event_name = os.environ.get("GITHUB_EVENT_NAME", "")
     
     if is_github_actions:
-        if github_event_name == "schedule": update_source_tag = "Scheduled Update"
-        elif github_event_name == "workflow_dispatch": update_source_tag = "GitHub Update"
-        else: update_source_tag = "GitHub Update (Bob)"
+        if github_event_name == "schedule":
+            update_source_tag = "Scheduled Update"
+        elif github_event_name == "workflow_dispatch":
+            update_source_tag = "GitHub Update"
+        else:
+            update_source_tag = "GitHub Update (Bob)"
     else:
         update_source_tag = "Local Update"
         
@@ -1472,7 +1478,7 @@ def run_sync_logic():
         days_to_process = [week_start + timedelta(days=i) for i in range(7)]
         
         # ====================================================
-        # 🌟 核心修改：在填入新資料前，先把 #Worklog 區間「無差別掃乾淨」
+        # 🌟 核心修正：在填入新資料前，先把 #Worklog 區間「無差別掃乾淨」
         # ====================================================
         print("\n🧹 執行清潔防呆：正在精準清洗 #Worklog 區間的所有歷史進度...")
         start_marker = soup.find(string=re.compile(r'#Worklog\s*$'))
@@ -1501,6 +1507,14 @@ def run_sync_logic():
         
         target_date = max(selected_dates)
         target_date_tags = [d.strftime("[%Y/%m/%d]") for d in days_to_process]
+
+        # ====================================================
+        # 🌟 核心修改：定義您要求的團隊嚴格指定順序
+        # ====================================================
+        STRICT_ORDER = ["sam.chang", "Vic Wu", "SF Hsieh", "shannonchang", "Bob Lin"]
+        
+        # 建立一個虛擬的暫存湯匙，用來依序收集所有人的排版結果
+        combined_soup = BeautifulSoup("", "html.parser")
 
         print("\n=========================================")
         print("🚀 開始針對個別成員進度進行封裝與排版...")
@@ -1561,12 +1575,16 @@ def run_sync_logic():
         if SETTINGS.get("inherit_parent_due"):
             for iss in all_issues_pool: ensure_project_rank_mapped(iss.get('fields', {}).get('project', {}).get('key'))
 
-        # 🌟 我們要把所有成員的日誌打包，統一「依序」安插在 #Worklog 的後面
-        # 為了讓排版 Bob 在最上面、SF 在最下面，我們將成員名單「反轉」處理，倒序塞入
-        insert_anchor = start_element if start_marker else soup.body
-
-        # 🌟 修正後的正序代碼：
-        for name, email in ACCOUNT_DICT.items():
+        # 🌟 依照您指定的嚴格順序，依序將各個同仁的進度封裝進 combined_soup 裡
+        for target_user_key in STRICT_ORDER:
+            # 從原有的 ACCOUNT_DICT 找出對應的真實名稱與 Email
+            name = next((k for k in ACCOUNT_DICT.keys() if k == target_user_key or (target_user_key == "Bob Lin" and k == "Bob Lin") or (target_user_key == "Vic Wu" and k == "Vic Wu") or (target_user_key == "SF Hsieh" and k == "SF Hsieh")), None)
+            if not name:
+                # 容錯處理：若是 key 對應不上下方的 Dict 鍵名，則做模糊比對
+                name = next((k for k in ACCOUNT_DICT.keys() if target_user_key.lower() in k.lower()), None)
+            if not name: continue
+                
+            email = ACCOUNT_DICT[name]
             acc_id = get_account_id(email, name)
             user_bg_color = USER_BG_COLORS.get(name, "#ffffff")
             
@@ -1620,7 +1638,7 @@ def run_sync_logic():
                 pending_abort = [p for p in pending_abort if p.get('duedate_dt') is not None]
                 pending_resume = [p for p in pending_resume if p.get('duedate_dt') is not None]
 
-            # 🌟 建立名字的人名 Tag 標題
+            # 建立人名標題
             p_user = soup.new_tag("p", style="margin-top:20px; margin-bottom:10px;")
             span_user = soup.new_tag("span", style=f"background-color:{user_bg_color}; font-weight:bold; font-size:120%; padding:3px 8px; border-radius:4px; border:1px solid #7f8c8d;")
             span_user.string = f"@{name}"
@@ -1632,13 +1650,17 @@ def run_sync_logic():
                 else:
                     new_html_block = generate_style_2_html(soup, target_date, logs, pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume, total_mins, bg_color=user_bg_color, update_source_tag=update_source_tag)
                 
-                # 🌟 精準順序插入：先插進度積木，再把人名 Tag 壓在積木正上方
-                insert_anchor.insert_after(new_html_block)
-                insert_anchor.insert_after(p_user)
+                # 🌟 正序疊加進臨時的 combined_soup 容器中
+                combined_soup.append(p_user)
+                combined_soup.append(new_html_block)
                 
                 total_logs_written += (len(logs) + len(pending_in_progress) + len(pending_waiting) + len(pending_todo) + len(pending_candidate) + len(pending_blocked) + len(pending_abort) + len(pending_resume))
                 page_needs_update = True
                 print(f"  ☑️ 成功處理 {name} 進度封裝。")
+
+        # 🌟 最後將排好順序的整包 combined_soup 一次性安插在 #Worklog 正下方
+        if page_needs_update and start_marker:
+            start_element.insert_after(combined_soup)
 
         if page_needs_update:
             print(f"\n💾 發現頁面有變動，正在將最終結果儲存至 Confluence...")
@@ -1656,7 +1678,7 @@ def run_sync_logic():
                 print(f"🎉 大功告成！已成功更新 {total_logs_written} 筆任務紀錄！")
 
                 # ==========================================
-                # 🌟 歷史大清洗：逆向拆除 Jira 的連動殘留
+                # 🌟 歷史大清洗與逆向防洗版
                 # ==========================================
                 jira_keys = list(set(re.findall(r'[A-Z][A-Z0-9]+-\d+', str(soup))))
                 if jira_keys:
