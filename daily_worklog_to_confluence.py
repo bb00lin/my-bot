@@ -11,10 +11,6 @@ from bs4 import BeautifulSoup, Tag, NavigableString
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
 
-# 🌟 新增 LINE Bot SDK 的匯入
-from linebot import LineBotApi
-from linebot.models import TextSendMessage
-
 # 載入自訂的環境變數檔案 (本地端測試用，GitHub Actions 會自動忽略)
 load_dotenv("jira_config.txt")
 
@@ -74,8 +70,8 @@ class SettingsManager:
             "day_auto": True, "day_mon": True, "day_tue": True, "day_wed": True,
             "day_thu": True, "day_fri": True, "show_label": True, "show_parent": True,
             "show_status": True, "show_comment": True, "minor_edit": True,
-            "inherit_parent_due": True, 
-            "due_date_mode": "方案一: 標題列 (統一以本週報產出日結算)", 
+            "inherit_parent_due": True, # ✅ 新增繼承父系到期日
+            "due_date_mode": "方案一: 標題列 (統一以本週報產出日結算)", # ✅ 新增到期日排版選項
             "show_pending_inprogress": True, "show_pending_waiting": True,
             "show_pending_todo": False, "show_pending_candidate": False,
             "show_pending_blocked": False, "show_pending_abort": False, "show_pending_resume": False,
@@ -135,6 +131,7 @@ def parse_jira_date_to_tz8(jira_time_str):
     except Exception:
         return jira_time_str[:10]
 
+# ✅ 強效時間解析器
 def parse_jira_date_to_dt(jira_time_str):
     if not jira_time_str: return None
     try:
@@ -508,7 +505,7 @@ def extract_logs_from_issues(name, email, account_id, target_dates_list, all_iss
         for wl in worklogs_data:
             author_id = wl.get('author', {}).get('accountId')
             author_email = wl.get('author', {}).get('emailAddress', '').lower()
-            if not ((account_id and author_id == account_id) or (email Castle and author_email == email.lower())): continue
+            if not ((account_id and author_id == account_id) or (email and author_email == email.lower())): continue
 
             comment_raw = wl.get('comment', 'NA')
             if isinstance(comment_raw, dict): 
@@ -1347,7 +1344,7 @@ def run_clear_logic():
         if not selected_dates: return print("⚠️ 未選擇任何要更新的日期(無法判斷目標頁面)。")
 
         target_title = get_target_report_title(selected_dates[0])
-        print(f"\n=========================================\n🎯 目標週報頁面: {target_title} (區間清除模式)\n=========================================\n")
+        print(f"\n=========================================\n🎯 目標週報頁面: {target_title} (清除模式)\n=========================================\n")
         print(f"🔍 正在 Confluence 搜尋頁面...")
         res = requests.get(api_endpoint, params={"title": target_title, "expand": "body.storage,version"}, auth=ADMIN_AUTH)
         pages = res.json().get('results', [])
@@ -1359,70 +1356,111 @@ def run_clear_logic():
         soup = BeautifulSoup(html_content, 'html.parser')
         
         page_needs_update = False
+        cleaned_count = 0
 
-        # 🌟 核心修改：定位 `#Worklog` 與 `#Worklog End` 的文字錨點
-        start_marker = soup.find(string=re.compile(r'#Worklog\s*$'))
-        end_marker = soup.find(string=re.compile(r'#Worklog End\s*$'))
+        for element in soup.find_all(lambda tag: tag.has_attr('class') and any(c.startswith('daily-worklog-') for c in tag['class'])):
+            element.extract()
+            page_needs_update = True
+            cleaned_count += 1
+        
+        for name, email in ACCOUNT_DICT.items():
+            acc_id = get_account_id(email, name)
+            target_mention = None
+            if acc_id:
+                ri_user = soup.find('ri:user', attrs={'ri:account-id': acc_id})
+                if ri_user: target_mention = ri_user.find_parent('ac:link')
+            if not target_mention:
+                all_links = soup.find_all('ac:link')
+                for link in all_links:
+                    if name.lower() in str(link).lower() or (email and email.split('@')[0].lower() in str(link).lower()):
+                        target_mention = link; break
+            if not target_mention:
+                target_mention = soup.find(string=re.compile(f"@{name}", re.I))
+                if not target_mention and email:
+                    target_mention = soup.find(string=re.compile(f"@{email.split('@')[0]}", re.I))
+            if not target_mention: continue
 
-        if start_marker and end_marker:
-            start_element = start_marker.parent
-            end_element = end_marker.parent
-            
-            # 搜集區間內所有舊日誌標籤與文字
-            elements_to_remove = []
-            current_element = start_element.next_sibling
-            while current_element and current_element != end_element:
-                elements_to_remove.append(current_element)
-                current_element = current_element.next_sibling
-                
-            if elements_to_remove:
-                print(f"🧹 偵測到 #Worklog 區間內有舊日誌，正在執行安全清洗...")
-                for element in elements_to_remove:
-                    if hasattr(element, 'decompose'): element.decompose()
-                    else: element.extract()
+            mention_container = target_mention.find_parent(['p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div'])
+            if not mention_container: mention_container = target_mention
+
+            if isinstance(mention_container, Tag) and mention_container.name in ['p', 'div', 'li', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                mention_container.name = 'h1'
                 page_needs_update = True
-        else:
-            print("⚠️ 網頁中找不到 #Worklog 或 #Worklog End 標記，跳過區間清洗。")
+
+            user_nodes = []
+            current_node = mention_container.next_sibling
+            while current_node:
+                if isinstance(current_node, NavigableString) and str(current_node).strip().startswith('@'): break 
+                if isinstance(current_node, Tag):
+                    if current_node.name == 'ac:link' or current_node.find('ac:link'): break 
+                    if current_node.name in ['h1', 'h2', 'hr']: break 
+                    if str(current_node.get_text()).strip().startswith('@'): break
+                user_nodes.append(current_node)
+                current_node = current_node.next_sibling
+
+            nodes_to_remove = []
+            i = 0
+            while i < len(user_nodes):
+                node = user_nodes[i]
+                text = node.get_text(strip=True) if isinstance(node, Tag) else str(node).strip()
+                if re.match(r'^\[\d{4}/\d{2}/\d{2}\]', text):
+                    nodes_to_remove.append(node)
+                    i += 1
+                    while i < len(user_nodes):
+                        next_node = user_nodes[i]
+                        next_text = next_node.get_text(strip=True) if isinstance(next_node, Tag) else str(next_node).strip()
+                        if re.match(r'^\[\d{4}/\d{2}/\d{2}\]', next_text): break
+                        nodes_to_remove.append(next_node)
+                        i += 1
+                else:
+                    i += 1
+
+        for node in nodes_to_remove:
+            node.extract()
+            page_needs_update = True
+            cleaned_count += 1
         
         if page_needs_update:
+            print(f"🧹 發現 {cleaned_count} 個日誌區塊/殘留，正在更新至 Confluence...")
             url = f"{api_endpoint}/{page_id}"
+            
             payload = {
-                "version": {"number": page_data['version']['number'] + 1, "minorEdit": SETTINGS.get("minor_edit")},
-                "title": page_data['title'],
-                "type": "page",
-                "body": {"storage": {"value": str(soup), "representation": "storage"}},
-                "metadata": {
-                    "properties": {
-                        "content-appearance-published": {"value": "full-width"},
-                        "content-appearance-draft": {"value": "full-width"}
+                    "version": {"number": page_data['version']['number'] + 1, "minorEdit": SETTINGS.get("minor_edit")},
+                    "title": page_data['title'],
+                    "type": "page",
+                    "body": {"storage": {"value": str(soup), "representation": "storage"}},
+                    "metadata": {
+                        "properties": {
+                            "content-appearance-published": {"value": "full-width"},
+                            "content-appearance-draft": {"value": "full-width"}
+                        }
                     }
                 }
-            }
             update_res = requests.put(url, json=payload, auth=ADMIN_AUTH, headers={"Content-Type": "application/json"})
             if update_res.status_code == 200:
-                print("🎉 大功告成！已成功清空 #Worklog 區間內的所有舊日誌。")
+                print("🎉 大功告成！已成功清除本頁所有舊日誌。")
             else: print(f"❌ 儲存至 Confluence 失敗: {update_res.text}")
         else:
-            print("📭 區間內本來就是空的，無需清除。")
+            print("📭 頁面乾淨無殘留，無需清除。")
 
     except Exception as e: print(f"\n❌ 程式發生意外錯誤: {e}")
 
 def run_sync_logic():
     start_time = time.time()
     
-    sync_status = "success"
-    sync_message = ""
-    total_logs_written = 0
-    
+    # ✅ 動態判斷 GitHub 執行環境並決定標籤
     is_github_actions = os.environ.get("GITHUB_ACTIONS") == "true"
     github_event_name = os.environ.get("GITHUB_EVENT_NAME", "")
     
     if is_github_actions:
-        if github_event_name == "schedule": update_source_tag = "Scheduled Update"
-        elif github_event_name == "workflow_dispatch": update_source_tag = "GitHub Update"
-        else: update_source_tag = "GitHub Update (Bob)"
+        if github_event_name == "schedule":
+            update_source_tag = "Scheduled Update (Bob)"
+        elif github_event_name == "workflow_dispatch":
+            update_source_tag = "Manual Update (Bob)"
+        else:
+            update_source_tag = "GitHub Update (Bob)"
     else:
-        update_source_tag = "Local Update"
+        update_source_tag = "Local Update (Bob)"
         
     try:
         if SETTINGS.get("auto_clear_first"):
@@ -1433,16 +1471,11 @@ def run_sync_logic():
             print("\n✅ 前置清除作業完成，準備開始批次寫入...\n")
 
         if not SETTINGS.get("filter_comment") and not SETTINGS.get("filter_started"):
-            sync_status = "error"
-            sync_message = "❌ 錯誤：請至少在 settings_daily.json 啟用一種「智慧過濾機制」。"
-            return print(sync_message)
+            return print("❌ 錯誤：請至少在 settings_daily.json 啟用一種「智慧過濾機制」。")
 
         api_endpoint = f"{JIRA_URL}/wiki/rest/api/content"
         selected_dates = get_selected_dates()
-        if not selected_dates:
-            sync_status = "warning"
-            sync_message = "⚠️ 未選擇任何要更新的日期。"
-            return print(sync_message)
+        if not selected_dates: return print("⚠️ 未選擇任何要更新的日期。")
 
         target_title = get_target_report_title(selected_dates[0])
         print(f"\n=========================================\n🎯 目標週報頁面: {target_title}\n=========================================\n")
@@ -1451,15 +1484,16 @@ def run_sync_logic():
         res = requests.get(api_endpoint, params={"title": target_title, "expand": "body.storage,version"}, auth=ADMIN_AUTH)
         
         if res.status_code != 200:
-            sync_status = "error"
             print(f"❌ API 請求被 Confluence 拒絕！(狀態碼: {res.status_code})")
+            print(f"💡 錯誤診斷提示：")
+            if res.status_code == 401: print("   👉 [401 未授權]: 請檢查 GitHub Secrets 的 CONF_USER 與 CONF_PASS。注意：CONF_PASS 必須是 Atlassian API Token，不能是登入密碼！")
+            elif res.status_code == 403: print("   👉 [403 權限不足]: 你的帳號沒有權限讀取此頁面，或 API Token 權限不足。")
+            elif res.status_code == 404: print(f"   👉 [404 找不到]: 請檢查 CONF_URL ({JIRA_URL}) 是否正確。")
+            print(f"📄 伺服器原始回傳內容: {res.text[:300]}")
             return
 
         pages = res.json().get('results', [])
-        if not pages:
-            sync_status = "error"
-            sync_message = f"❌ 找不到目標頁面 {target_title}，請先確保週報已建立！"
-            return print(sync_message)
+        if not pages: return print(f"❌ 找不到目標頁面 {target_title}，請先確保週報已建立！")
             
         page_data = pages[0]
         page_id = page_data['id']
@@ -1467,34 +1501,28 @@ def run_sync_logic():
         soup = BeautifulSoup(html_content, 'html.parser')
         
         page_needs_update = False
+        total_logs_written = 0
 
         week_start = selected_dates[0] - timedelta(days=selected_dates[0].weekday())
         days_to_process = [week_start + timedelta(days=i) for i in range(7)]
+        week_strs = [d.strftime("%Y%m%d") for d in days_to_process]
         
-        # ====================================================
-        # 🌟 核心修改：在填入新資料前，先把 #Worklog 區間「無差別掃乾淨」
-        # ====================================================
-        print("\n🧹 執行清潔防呆：正在精準清洗 #Worklog 區間的所有歷史進度...")
-        start_marker = soup.find(string=re.compile(r'#Worklog\s*$'))
-        end_marker = soup.find(string=re.compile(r'#Worklog End\s*$'))
-
-        if start_marker and end_marker:
-            start_element = start_marker.parent
-            end_element = end_marker.parent
-            
-            elements_to_remove = []
-            current_element = start_element.next_sibling
-            while current_element and current_element != end_element:
-                elements_to_remove.append(current_element)
-                current_element = current_element.next_sibling
-                
-            for element in elements_to_remove:
-                if hasattr(element, 'decompose'): element.decompose()
-                else: element.extract()
-            page_needs_update = True
-            print("  └ ✅ #Worklog 區間舊日誌已全部清除乾淨。")
-        else:
-            print("  └ ⚠️ 找不到 #Worklog 區間標記，將以追加方式寫入。")
+        print("\n🧹 執行清潔防呆：正在清除目標區間(整週)的歷史紀錄...")
+        cleaned_count = 0
+        for element in soup.find_all(lambda tag: tag.has_attr('class') and any(c.startswith('daily-worklog-') for c in tag['class'])):
+            for c in element['class']:
+                if c.startswith('daily-worklog-'):
+                    date_str = c.replace('daily-worklog-', '')
+                    if len(date_str) == 8 and date_str.isdigit():
+                        if date_str in week_strs:
+                            element.extract()
+                            page_needs_update = True
+                            cleaned_count += 1
+                            print(f"  └ 🗑️ 刪除舊紀錄積木: {date_str}")
+                    break
+                    
+        if cleaned_count > 0: print(f"  └ ✅ 共清理了 {cleaned_count} 個舊區塊。")
+        else: print("  └ ✨ 頁面乾淨無殘留。")
 
         print(f"\n📡 啟動全域雷達：一次性掃描 Jira 自 {week_start.strftime('[%Y/%m/%d]')} 起的所有變更紀錄...")
         all_issues_pool = fetch_all_recent_issues(week_start)
@@ -1503,20 +1531,23 @@ def run_sync_logic():
         target_date_tags = [d.strftime("[%Y/%m/%d]") for d in days_to_process]
 
         print("\n=========================================")
-        print("🚀 開始針對個別成員進度進行封裝與排版...")
+        print("🚀 開始針對個別成員進行全區間合併寫入...")
 
+        # === 🌟 1. 批量讀取明確的父系(Epic) Due Date (實體關聯) ===
         explicit_parent_due_map = {}
         if SETTINGS.get("inherit_parent_due"):
             parent_keys_to_fetch = set()
             for iss in all_issues_pool:
                 fields = iss.get('fields') or {}
                 parent_data = fields.get('parent') or {}
-                if parent_data.get('key'): parent_keys_to_fetch.add(parent_data['key'])
+                if parent_data.get('key'):
+                    parent_keys_to_fetch.add(parent_data['key'])
             
             if parent_keys_to_fetch:
                 p_list = list(parent_keys_to_fetch)
-                for i in range(0, len(p_list), 50):
-                    chunk = p_list[i:i+50]
+                chunk_size = 50
+                for i in range(0, len(p_list), chunk_size):
+                    chunk = p_list[i:i+chunk_size]
                     jql = f"key in ({','.join(chunk)})"
                     try:
                         pres = requests.post(f"{JIRA_URL}/rest/api/3/search/jql", json={"jql": jql, "maxResults": 100, "fields": ["duedate", "summary"]}, auth=ADMIN_AUTH, timeout=10)
@@ -1524,69 +1555,156 @@ def run_sync_logic():
                             for pi in pres.json().get('issues', []):
                                 fields = pi.get('fields') or {}
                                 due = fields.get('duedate')
-                                if due: explicit_parent_due_map[pi['key']] = {'due': due, 'summary': fields.get('summary', 'Unknown'), 'key': pi['key']}
+                                if due:
+                                    explicit_parent_due_map[pi['key']] = {'due': due, 'summary': fields.get('summary', 'Unknown'), 'key': pi['key']}
                     except: pass
 
+        # === 🌟 2. 批量讀取故事(Story)的 Due Date (單向狀態機視覺排序) ===
         story_due_map = {}
         fetched_projects = set()
 
         def ensure_project_rank_mapped(proj_key):
             if not proj_key or proj_key in fetched_projects: return
             fetched_projects.add(proj_key)
+            print(f"  └ 🧠 啟動單向狀態機：掃描專案 [{proj_key}] 看板排序，計算 Story/Epic 繼承到期日...")
             try:
+                # 使用 ORDER BY Rank ASC 來確保絕對符合 Jira 看板的由上往下視覺順序
                 jql = f'project = "{proj_key}" ORDER BY Rank ASC'
                 res = requests.post(f"{JIRA_URL}/rest/api/3/search/jql", json={"jql": jql, "maxResults": 3000, "fields": ["issuetype", "duedate", "summary"]}, auth=ADMIN_AUTH, timeout=15)
                 if res.status_code == 200:
                     current_epic_due, current_epic_summary, current_epic_key = None, "", ""
                     current_story_due, current_story_summary, current_story_key = None, "", ""
+                    
                     for i_rank in res.json().get('issues', []):
                         r_key = i_rank['key']
                         r_fields = i_rank.get('fields') or {}
                         r_type = r_fields.get('issuetype', {}).get('name', '').lower()
                         r_due = r_fields.get('duedate')
                         r_summary = r_fields.get('summary', 'Unknown')
+                        
                         is_epic = 'epic' in r_type or '大型工作' in r_type or r_fields.get('issuetype', {}).get('hierarchyLevel') == 1
                         is_story = 'story' in r_type or '故事' in r_type
+                        
                         if is_epic:
                             current_epic_due, current_epic_summary, current_epic_key = r_due, r_summary, r_key
+                            # 遇到新 Epic，強制清空 Story 口袋記憶
                             current_story_due, current_story_summary, current_story_key = None, "", ""
                         elif is_story:
                             current_story_due, current_story_summary, current_story_key = r_due, r_summary, r_key
                         else:
+                            # 是 Task 或 Sub-task，看自己有沒有到期日。沒有才繼承！
                             if not r_due:
-                                if current_story_due: story_due_map[r_key] = {'due': current_story_due, 'summary': current_story_summary, 'key': current_story_key}
-                                elif current_epic_due: story_due_map[r_key] = {'due': current_epic_due, 'summary': current_epic_summary, 'key': current_epic_key}
-            except: pass
+                                if current_story_due:
+                                    story_due_map[r_key] = {'due': current_story_due, 'summary': current_story_summary, 'key': current_story_key}
+                                elif current_epic_due:
+                                    story_due_map[r_key] = {'due': current_epic_due, 'summary': current_epic_summary, 'key': current_epic_key}
+            except Exception as e:
+                print(f"    ❌ 掃描專案 {proj_key} 排序時發生錯誤: {e}")
 
+        # 預先掃描近期有更新的專案 (狀態機會自動過濾重複的專案)
         if SETTINGS.get("inherit_parent_due"):
-            for iss in all_issues_pool: ensure_project_rank_mapped(iss.get('fields', {}).get('project', {}).get('key'))
+            for iss in all_issues_pool:
+                ensure_project_rank_mapped(iss.get('fields', {}).get('project', {}).get('key'))
 
-        # 🌟 我們要把所有成員的日誌打包，統一「依序」安插在 #Worklog 的後面
-        # 為了讓排版 Bob 在最上面、SF 在最下面，我們將成員名單「反轉」處理，倒序塞入
-        insert_anchor = start_element if start_marker else soup.body
-
-        for name, email in reversed(list(ACCOUNT_DICT.items())):
+        for name, email in ACCOUNT_DICT.items():
             acc_id = get_account_id(email, name)
+            
+            # ✅ 動態取得使用者的背景顏色
             user_bg_color = USER_BG_COLORS.get(name, "#ffffff")
+            
+            target_mention = None
+            if acc_id:
+                ri_user = soup.find('ri:user', attrs={'ri:account-id': acc_id})
+                if ri_user: target_mention = ri_user.find_parent('ac:link')
+                    
+            if not target_mention:
+                all_links = soup.find_all('ac:link')
+                for link in all_links:
+                    if name.lower() in str(link).lower() or (email and email.split('@')[0].lower() in str(link).lower()):
+                        target_mention = link; break
+            
+            if not target_mention:
+                target_mention = soup.find(string=re.compile(f"@{name}", re.I))
+                if not target_mention and email:
+                    target_mention = soup.find(string=re.compile(f"@{email.split('@')[0]}", re.I))
+            if not target_mention: continue
+
+            mention_container = target_mention.find_parent(['p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div'])
+            if not mention_container: mention_container = target_mention
+
+            if isinstance(mention_container, Tag) and mention_container.name in ['p', 'div', 'li', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                mention_container.name = 'h1'
+                page_needs_update = True
+
+            user_nodes = []
+            current_node = mention_container.next_sibling
+            while current_node:
+                if isinstance(current_node, NavigableString) and str(current_node).strip().startswith('@'): break 
+                if isinstance(current_node, Tag):
+                    if current_node.name == 'ac:link' or current_node.find('ac:link'): break 
+                    if current_node.name in ['h1', 'h2', 'hr']: break 
+                    if str(current_node.get_text()).strip().startswith('@'): break
+                user_nodes.append(current_node)
+                current_node = current_node.next_sibling
+
+            nodes_to_remove = []
+            i = 0
+            while i < len(user_nodes):
+                node = user_nodes[i]
+                text = node.get_text(strip=True) if isinstance(node, Tag) else str(node).strip()
+                matched_target = next((tdt for tdt in target_date_tags if text.startswith(tdt)), None)
+                        
+                if matched_target:
+                    nodes_to_remove.append(node); i += 1
+                    while i < len(user_nodes):
+                        next_node = user_nodes[i]
+                        if next_node in nodes_to_remove: break
+                        next_text = next_node.get_text(strip=True) if isinstance(next_node, Tag) else str(next_node).strip()
+                        if re.match(r'^\[\d{4}/\d{2}/\d{2}\]', next_text): break
+                        nodes_to_remove.append(next_node); i += 1
+                else: i += 1
+
+            for node in nodes_to_remove:
+                node.extract()
+                page_needs_update = True
+
+            # ====================================================
+            # ✅ 核心寫入邏輯：直接一次性整週輸出！
+            # ====================================================
+            date_str_tag = target_date.strftime("[%Y/%m/%d]")
+            safe_date_class = target_date.strftime("%Y%m%d")
             
             logs = extract_logs_from_issues(name, email, acc_id, days_to_process, all_issues_pool)
             
+            # 🌟 套用依附父系到期日邏輯 (對 logs)
             if SETTINGS.get("inherit_parent_due"):
                 for log in logs:
                     proj_key = log['key'].split('-')[0]
                     ensure_project_rank_mapped(proj_key)
+                    
                     if not log.get('duedate_dt'):
-                        p_info = story_due_map.get(log['key']) or explicit_parent_due_map.get(log.get('parent_key', ''))
+                        p_info = None
+                        is_from_story = False
+                        # 1. 優先檢查 Story (視覺排序)
+                        if log['key'] in story_due_map:
+                            p_info = story_due_map[log['key']]
+                            is_from_story = True
+                        # 2. 次要檢查 Epic (實體父系連結)
+                        elif log.get('parent_key') and log['parent_key'] in explicit_parent_due_map:
+                            p_info = explicit_parent_due_map[log['parent_key']]
+                            
                         if p_info:
                             log['duedate_dt'] = datetime.strptime(p_info['due'][:10], "%Y-%m-%d")
                             log['duedate'] = f'"Due {log["duedate_dt"].strftime("%y")}\' {log["duedate_dt"].month}/{log["duedate_dt"].day}"'
                             log['parent_due_key'] = p_info['key']
                             log['parent_due_summary'] = p_info['summary']
-                            log['is_inherited_from_story'] = (log['key'] in story_due_map)
+                            log['is_inherited_from_story'] = is_from_story
 
             if SETTINGS.get("style_weekly") and logs:
                 daily_aggregated_logs = enrich_with_weekly_data(logs, name, email, acc_id, days_to_process, all_issues_pool)
+                # 總工時計算 (針對 selected_dates)
                 total_mins = sum(d.get('total_mins_day', 0) for log in daily_aggregated_logs for d in log['daily_days'] if d['date'].date() in [sd.date() for sd in selected_dates])
+                
                 weekend_mins = sum(d.get('total_mins_day', 0) for log in daily_aggregated_logs for d in log['daily_days'] if d['date'].weekday() >= 5 and d['date'].date() in [sd.date() for sd in selected_dates])
             else:
                 daily_aggregated_logs = None
@@ -1596,19 +1714,30 @@ def run_sync_logic():
             updated_keys = {log['key'] for log in logs}
             pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume = fetch_pending_tasks(acc_id, updated_keys, target_date)
             
+            # 🌟 套用依附父系到期日邏輯 (對 pending)
             if SETTINGS.get("inherit_parent_due"):
                 for p_list in [pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume]:
                     for t in p_list:
                         proj_key = t['key'].split('-')[0]
                         ensure_project_rank_mapped(proj_key)
+                        
                         if not t.get('duedate_dt'):
-                            p_info = story_due_map.get(t['key']) or explicit_parent_due_map.get(t.get('parent_key', ''))
+                            p_info = None
+                            is_from_story = False
+                            # 1. 優先檢查 Story (視覺排序)
+                            if t['key'] in story_due_map:
+                                p_info = story_due_map[t['key']]
+                                is_from_story = True
+                            # 2. 次要檢查 Epic (實體父系連結)
+                            elif t.get('parent_key') and t['parent_key'] in explicit_parent_due_map:
+                                p_info = explicit_parent_due_map[t['parent_key']]
+                                
                             if p_info:
                                 t['duedate_dt'] = datetime.strptime(p_info['due'][:10], "%Y-%m-%d")
                                 t['duedate'] = f'"Due {t["duedate_dt"].strftime("%y")}\' {t["duedate_dt"].month}/{t["duedate_dt"].day}"'
                                 t['parent_due_key'] = p_info['key']
                                 t['parent_due_summary'] = p_info['summary']
-                                t['is_inherited_from_story'] = (t['key'] in story_due_map)
+                                t['is_inherited_from_story'] = is_from_story
 
             if SETTINGS.get("show_pending_has_due"):
                 pending_in_progress = [p for p in pending_in_progress if p.get('duedate_dt') is not None]
@@ -1619,25 +1748,33 @@ def run_sync_logic():
                 pending_abort = [p for p in pending_abort if p.get('duedate_dt') is not None]
                 pending_resume = [p for p in pending_resume if p.get('duedate_dt') is not None]
 
-            # 🌟 建立名字的人名 Tag 標題
-            p_user = soup.new_tag("p", style="margin-top:20px; margin-bottom:10px;")
-            span_user = soup.new_tag("span", style=f"background-color:{user_bg_color}; font-weight:bold; font-size:120%; padding:3px 8px; border-radius:4px; border:1px solid #7f8c8d;")
-            span_user.string = f"@{name}"
-            p_user.append(span_user)
-
-            if daily_aggregated_logs or logs:
+            has_pending_p = bool(SETTINGS.get("show_pending_inprogress") and pending_in_progress)
+            has_pending_w = bool(SETTINGS.get("show_pending_waiting") and pending_waiting)
+            has_pending_t = bool(SETTINGS.get("show_pending_todo") and pending_todo)
+            has_pending_c = bool(SETTINGS.get("show_pending_candidate") and pending_candidate)
+            has_pending_b = bool(SETTINGS.get("show_pending_blocked") and pending_blocked)
+            has_pending_a = bool(SETTINGS.get("show_pending_abort") and pending_abort)
+            has_pending_r = bool(SETTINGS.get("show_pending_resume") and pending_resume)
+            
+            if logs or has_pending_p or has_pending_w or has_pending_t or has_pending_c or has_pending_b or has_pending_a or has_pending_r:
                 if SETTINGS.get("style_weekly") and daily_aggregated_logs:
                     new_html_block = generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_logs, pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume, total_mins, weekend_mins, bg_color=user_bg_color, update_source_tag=update_source_tag)
                 else:
                     new_html_block = generate_style_2_html(soup, target_date, logs, pending_in_progress, pending_waiting, pending_todo, pending_candidate, pending_blocked, pending_abort, pending_resume, total_mins, bg_color=user_bg_color, update_source_tag=update_source_tag)
                 
-                # 🌟 精準順序插入：先插進度積木，再把人名 Tag 壓在積木正上方
-                insert_anchor.insert_after(new_html_block)
-                insert_anchor.insert_after(p_user)
-                
+                mention_container.insert_after(new_html_block)
                 total_logs_written += (len(logs) + len(pending_in_progress) + len(pending_waiting) + len(pending_todo) + len(pending_candidate) + len(pending_blocked) + len(pending_abort) + len(pending_resume))
                 page_needs_update = True
-                print(f"  ☑️ 成功處理 {name} 進度封裝。")
+                
+                print(f"  ☑️ 成功合併處理 {name} ({date_str_tag} 有更新: {len(logs)} 筆, 進行: {len(pending_in_progress)} 筆, Waiting: {len(pending_waiting)} 筆, To Do: {len(pending_todo)} 筆, Candidate: {len(pending_candidate)} 筆):")
+                
+                printed_keys = set()
+                for log in logs:
+                    if log['key'] not in printed_keys:
+                        trans = log.get('transition', '')
+                        trans_text = f" {trans}" if trans else f" [{translate_status(log['status'])}]"
+                        print(f"     └ [已寫入] [{log['key']}] {log['summary'][:20]}.. {trans_text}")
+                        printed_keys.add(log['key'])
 
         if page_needs_update:
             print(f"\n💾 發現頁面有變動，正在將最終結果儲存至 Confluence...")
@@ -1650,64 +1787,18 @@ def run_sync_logic():
             }
             update_res = requests.put(url, json=payload, auth=ADMIN_AUTH, headers={"Content-Type": "application/json"})
             if update_res.status_code == 200:
-                page_url = f"{JIRA_URL}/wiki/pages/viewpage.action?pageId={page_id}"
-                sync_message = f"🎉 同步完成！\n本次共更新了 {total_logs_written} 筆任務紀錄至 Confluence。\n目標頁面：{target_title}\n網址連結：{page_url}"
-                print(f"🎉 大功告成！已成功更新 {total_logs_written} 筆任務紀錄！")
-
-                # ==========================================
-                # 🌟 歷史大清洗：逆向拆除 Jira 的連動殘留
-                # ==========================================
-                jira_keys = list(set(re.findall(r'[A-Z][A-Z0-9]+-\d+', str(soup))))
-                if jira_keys:
-                    print(f"\n⏳ 偵測到 {len(jira_keys)} 個 Jira 任務。等待 5 秒鐘讓系統連動...")
-                    time.sleep(5)
-                    cleared_count = 0
-                    for key in jira_keys:
-                        try:
-                            remote_link_url = f"{JIRA_URL}/rest/api/3/issue/{key}/remotelink"
-                            r_links_resp = requests.get(remote_link_url, auth=ADMIN_AUTH, timeout=10)
-                            if r_links_resp.status_code == 200:
-                                for link_obj in r_links_resp.json():
-                                    url_val = link_obj.get('object', {}).get('url', '')
-                                    title_val = link_obj.get('object', {}).get('title', '')
-                                    if "WeeklyReport" in title_val or "WeeklyReport" in url_val or str(page_id) in url_val:
-                                        link_id = link_obj.get('id')
-                                        del_resp = requests.delete(f"{remote_link_url}/{link_id}", auth=ADMIN_AUTH, timeout=10)
-                                        if del_resp.status_code in [200, 204]: cleared_count += 1
-                        except: pass
-                    print(f"✅ 歷史大清洗完畢！共成功拔除了 {cleared_count} 筆殘留的 Jira 週報連動紀錄。")
-            else:
-                sync_status = "error"
-                sync_message = f"❌ 儲存至 Confluence 失敗。"
+                notice_text = "🔇已啟動靜默更新" if SETTINGS.get("minor_edit") else "🔊已發送公開通知"
+                print(f"🎉 大功告成！已成功更新 {total_logs_written} 筆任務紀錄 ({notice_text})！")
+            else: print(f"❌ 儲存至 Confluence 失敗: {update_res.text}")
         else:
-            sync_status = "warning"
-            sync_message = "📭 執行完畢，沒有找到需要變動的紀錄。"
-            print(f"\n{sync_message}")
+            print(f"\n📭 根據你選擇的日期，沒有找到任何需要變動的紀錄。")
 
-    except Exception as e:
-        sync_status = "error"
-        sync_message = f"❌ 程式發生意外錯誤：{e}"
-        print(f"\n{sync_message}")
+    except Exception as e: print(f"\n❌ 程式發生意外錯誤: {e}")
     finally:
         elapsed = int(time.time() - start_time)
         mins, secs = divmod(elapsed, 60)
         time_str = f"{mins}m{secs}s" if mins > 0 else f"{secs}s"
-        
-        line_user_id = os.environ.get("LINE_USER_ID", "")
-        line_display_name = os.environ.get("LINE_DISPLAY_NAME", "")
-        line_access_token = os.environ.get("LINE_ACCESS_TOKEN", "")
-        admin_user_id = "U2e9b79c2f71cb2a3db62e5d75254270c"
-        
-        if line_user_id and line_access_token:
-            user_label = line_display_name if line_display_name else f"ID: {line_user_id}"
-            try:
-                line_bot_api = LineBotApi(line_access_token)
-                final_push_message = f"{sync_message}\n\n⏱️ 執行耗時: {time_str}"
-                line_bot_api.push_message(line_user_id, TextSendMessage(text=final_push_message))
-                if line_user_id != admin_user_id:
-                    admin_copy_message = f"🕵️ 任務完工報告副本\n執行同仁：{user_label}\n\n{final_push_message}"
-                    line_bot_api.push_message(admin_user_id, TextSendMessage(text=admin_copy_message))
-            except Exception as e: print(f"❌ LINE 推播回報發送失敗: {e}")
+        print(f"\n🏁 任務結束。 (總耗時: {time_str})")
 
 if __name__ == "__main__":
     print("=== Confluence 自動填表機 (GitHub Actions Headless V50.15 全週合併版) ===")
