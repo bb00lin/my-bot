@@ -1565,7 +1565,8 @@ def run_sync_logic():
         # 為了讓排版 Bob 在最上面、SF 在最下面，我們將成員名單「反轉」處理，倒序塞入
         insert_anchor = start_element if start_marker else soup.body
 
-        for name, email in reversed(list(ACCOUNT_DICT.items())):
+        # 🌟 修正後的正序代碼：
+        for name, email in ACCOUNT_DICT.items():
             acc_id = get_account_id(email, name)
             user_bg_color = USER_BG_COLORS.get(name, "#ffffff")
             
