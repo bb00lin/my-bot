@@ -508,7 +508,7 @@ def extract_logs_from_issues(name, email, account_id, target_dates_list, all_iss
         for wl in worklogs_data:
             author_id = wl.get('author', {}).get('accountId')
             author_email = wl.get('author', {}).get('emailAddress', '').lower()
-            if not ((account_id and author_id == account_id) or (email Castle and author_email == email.lower())): continue
+            if not ((account_id and author_id == account_id) or (email and author_email == email.lower())): continue
 
             comment_raw = wl.get('comment', 'NA')
             if isinstance(comment_raw, dict): 
