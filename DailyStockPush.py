@@ -35,6 +35,7 @@ MODEL_CANDIDATES = [
 ]
 CURSOR_MODEL = "composer-2.5"
 CURSOR_API_BASE = "https://api.cursor.com/v1"
+CURSOR_DASHBOARD_URL = "https://cursor.com/dashboard"
 CURSOR_TERMINAL_STATUSES = {"FINISHED", "ERROR", "CANCELLED", "EXPIRED"}
 
 HAS_GENAI = False
@@ -220,7 +221,12 @@ def get_ai_provider_label():
         return "Cursor API"
     if ACTIVE_AI_PROVIDER == "gemini":
         return "Gemini API"
-    return "AI API"
+    return "未啟用 AI"
+
+def get_cost_display_for_sheet(twd_cost):
+    if ACTIVE_AI_PROVIDER == "cursor":
+        return CURSOR_DASHBOARD_URL
+    return f"NT$ {twd_cost} 元"
 
 def get_ai_cost_report_html():
     provider_label = get_ai_provider_label()
@@ -228,7 +234,7 @@ def get_ai_cost_report_html():
         return (
             f"<p><b>【{provider_label} 帳單】</b><br>"
             f"- AI 呼叫總次數：<span style='color:#d9480f;'>{GLOBAL_TOKEN_BILLING['api_calls']}</span><br>"
-            f"- 詳細費用請至 <a href='https://cursor.com/dashboard'>Cursor Dashboard</a> 查看</p>"
+            f"- 帳單查詢：<a href='{CURSOR_DASHBOARD_URL}'>{CURSOR_DASHBOARD_URL}</a></p>"
         )
     return (
         f"<p><b>【{provider_label} 帳單】</b><br>"
@@ -237,7 +243,8 @@ def get_ai_cost_report_html():
     )
 
 def calculate_twd_cost():
-    USD_PER_M_INPUT, USD_PER_M_OUTPUT, FX_USD_TO_TWD = 0.075, 0.30, 32.5      
+    # Gemini Flash 級距參考費率 (USD/百萬 tokens)：輸入 0.075、輸出 0.30；匯率 32.5 TWD/USD
+    USD_PER_M_INPUT, USD_PER_M_OUTPUT, FX_USD_TO_TWD = 0.075, 0.30, 32.5
     usd_cost = ((GLOBAL_TOKEN_BILLING["prompt_tokens"] / 1_000_000) * USD_PER_M_INPUT) + ((GLOBAL_TOKEN_BILLING["completion_tokens"] / 1_000_000) * USD_PER_M_OUTPUT)
     return round(usd_cost * FX_USD_TO_TWD, 4)
 
@@ -278,14 +285,42 @@ def sync_to_sheets(data_list):
 
 def log_execution_cost_to_sheets(spreadsheet, current_time, twd_cost):
     try:
-        try: cost_sheet = spreadsheet.worksheet("Token與費用統計")
-        except:
-            cost_sheet = spreadsheet.add_worksheet(title="Token與費用統計", rows=1000, cols=6)
-            cost_sheet.append_row(['執行時間', 'AI 呼叫總次數', '輸入 Token (Prompt)', '輸出 Token (Completion)', '總 Token 消耗', '預估台幣費用 (TWD)'])
-            cost_sheet.format("A1:F1", {"textFormat": {"bold": True}, "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}, "horizontalAlignment": "CENTER"})
-        
-        cost_sheet.append_row([current_time, GLOBAL_TOKEN_BILLING["api_calls"], GLOBAL_TOKEN_BILLING["prompt_tokens"], GLOBAL_TOKEN_BILLING["completion_tokens"], GLOBAL_TOKEN_BILLING["total_tokens"], f"NT$ {twd_cost} 元"], value_input_option='USER_ENTERED')
-    except: pass
+        base_headers = [
+            '執行時間', 'AI 呼叫總次數', '輸入 Token (Prompt)',
+            '輸出 Token (Completion)', '總 Token 消耗', '預估台幣費用 (TWD)',
+        ]
+        try:
+            cost_sheet = spreadsheet.worksheet("Token與費用統計")
+        except Exception:
+            cost_sheet = spreadsheet.add_worksheet(title="Token與費用統計", rows=1000, cols=7)
+            cost_sheet.append_row(base_headers + ['AI 提供者'])
+            cost_sheet.format(
+                "A1:G1",
+                {"textFormat": {"bold": True}, "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}, "horizontalAlignment": "CENTER"},
+            )
+        else:
+            headers = cost_sheet.row_values(1)
+            if len(headers) < 6:
+                cost_sheet.update("A1:F1", [base_headers])
+            if len(headers) < 7 or (len(headers) >= 7 and headers[6] != 'AI 提供者'):
+                cost_sheet.update_cell(1, 7, 'AI 提供者')
+
+        provider_label = get_ai_provider_label()
+        cost_display = get_cost_display_for_sheet(twd_cost)
+        cost_sheet.append_row(
+            [
+                current_time,
+                GLOBAL_TOKEN_BILLING["api_calls"],
+                GLOBAL_TOKEN_BILLING["prompt_tokens"],
+                GLOBAL_TOKEN_BILLING["completion_tokens"],
+                GLOBAL_TOKEN_BILLING["total_tokens"],
+                cost_display,
+                provider_label,
+            ],
+            value_input_option='USER_ENTERED',
+        )
+    except Exception:
+        pass
 
 def get_global_stock_info():
     dl = DataLoader()
@@ -712,7 +747,7 @@ def main():
         print(f"🔹 AI 提供者：{provider_label}")
         print(f"🔹 AI API 呼叫總次數：{GLOBAL_TOKEN_BILLING['api_calls']} 次")
         if ACTIVE_AI_PROVIDER == "cursor":
-            print("🔹 詳細 Cursor 費用請至 Cursor Dashboard 查看")
+            print(f"🔹 帳單查詢：{CURSOR_DASHBOARD_URL}")
         else:
             print(f"🔹 總消耗 Tokens：{GLOBAL_TOKEN_BILLING['total_tokens']:,}")
             print(f"🔹 預估本次花費台幣：NT$ {twd_cost} 元")
@@ -747,7 +782,12 @@ def main():
 
         if LINE_ACCESS_TOKEN:
             if ACTIVE_AI_PROVIDER == "cursor":
-                ai_bill_text = f"── 💸 今日 AI 帳單明細 ──\n🔹 AI 提供者：{provider_label}\n🔹 AI 呼叫次數：{GLOBAL_TOKEN_BILLING['api_calls']}\n💰 詳細費用請至 Cursor Dashboard 查看"
+                ai_bill_text = (
+                    f"── 💸 今日 AI 帳單明細 ──\n"
+                    f"🔹 AI 提供者：{provider_label}\n"
+                    f"🔹 AI 呼叫次數：{GLOBAL_TOKEN_BILLING['api_calls']}\n"
+                    f"💰 帳單查詢：{CURSOR_DASHBOARD_URL}"
+                )
             else:
                 ai_bill_text = f"── 💸 今日 AI 帳單明細 ──\n🔹 AI 提供者：{provider_label}\n🔹 總消耗 Tokens：{GLOBAL_TOKEN_BILLING['total_tokens']:,}\n💰 今日預估費用：NT$ {twd_cost} 元"
             line_msg = f"📊 【{current_time} 戰略報告已更新】\n\n全新【提前攔截初升段】引擎已發動！AI 總監已為您優先從底部潛伏與剛突破的標的中進行精選。\n\n🔗 點擊直達雲端主報表：\n{report_sheet_url}\n\n{ai_bill_text}\n\n{line_quota_report}"
