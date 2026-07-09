@@ -25,7 +25,7 @@ permissions:
 jobs:
   run_job:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -51,6 +51,7 @@ jobs:
 
       - name: Run DailyStockPush
         env:
+          PYTHONUNBUFFERED: "1"
           # 手動觸發：依勾選決定是否啟用 AI 與提供者 (二選一或都不勾)
           # 自動排程 / repository_dispatch：一律啟用 Cursor API
           ENABLE_AI: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.enable_gemini_ai == 'true' || github.event.inputs.enable_cursor_ai == 'true') && 'true' || (github.event_name != 'workflow_dispatch' && 'true' || 'false') }}

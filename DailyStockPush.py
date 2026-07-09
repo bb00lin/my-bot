@@ -421,6 +421,9 @@ def get_limit_up_potential(r):
 def get_ai_strategy(data):
     if data.get('skip_ai'): return "⏸️ 已手動關閉 AI 分析"
     if not HAS_GENAI: return "AI 服務暫停"
+    # Cursor Agent 每次呼叫耗時長，個股分析改由技術指標呈現，AI 集中用於戰略總結
+    if ACTIVE_AI_PROVIDER == "cursor":
+        return f"📋 {data.get('hint', '持續追蹤')} | {data.get('ma_alert') or '詳見戰略總結報告'}"
     
     profit_info = "目前無庫存，純觀察"
     if data['is_hold']:
