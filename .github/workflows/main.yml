@@ -37,13 +37,15 @@ jobs:
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
         run: python DailyStockBot.py
 
-      #- name: 6. 執行 AI 戰略體檢與推播 (Push)
-      #  env:
-          # 🚀 [新增] 將 AI 戰報與郵件發送所需的所有祕鑰完美對接進環境變數
-          #LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
-          #LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-          #GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          #GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
-          #MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
-          #MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
-        #run: python DailyStockPush.py
+      - name: 6. 執行 AI 戰略體檢與推播 (Push)
+        env:
+          PYTHONUNBUFFERED: "1"
+          ENABLE_AI: "true"
+          AI_PROVIDER: "cursor"
+          LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+        run: python DailyStockPush.py
