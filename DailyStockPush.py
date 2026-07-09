@@ -17,6 +17,8 @@ logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = "U2e9b79c2f71cb2a3db62e5d75254270c"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+CURSOR_API_KEY = os.getenv("CURSOR_API_KEY")
+AI_PROVIDER = os.getenv("AI_PROVIDER", "").lower().strip()
 
 # Email 設定
 MAIL_RECEIVERS = ['bb00lin@gmail.com']
@@ -31,9 +33,13 @@ MODEL_CANDIDATES = [
     "gemini-2.0-flash",
     "gemini-1.5-flash",
 ]
+CURSOR_MODEL = "composer-2.5"
+CURSOR_API_BASE = "https://api.cursor.com/v1"
+CURSOR_TERMINAL_STATUSES = {"FINISHED", "ERROR", "CANCELLED", "EXPIRED"}
 
 HAS_GENAI = False
 AI_CLIENT = None
+ACTIVE_AI_PROVIDER = None
 GLOBAL_TOKEN_BILLING = {
     "prompt_tokens": 0,
     "completion_tokens": 0,
@@ -44,39 +50,149 @@ GLOBAL_TOKEN_BILLING = {
 # ==========================================
 # [啟動檢查] AI 自我診斷與環境變數開關
 # ==========================================
-def check_ai_health():
-    global HAS_GENAI, AI_CLIENT
-    
-    # 接收 GitHub Actions 傳來的開關訊號 (預設為 true)
-    enable_ai_env = str(os.getenv("ENABLE_AI", "true")).lower() == "true"
-    
-    if not enable_ai_env:
-        print("⏸️ [系統提示] 依據手動執行設定，本次工作不啟動 AI 服務，以節省 Token。")
-        HAS_GENAI = False
-        return
+def _resolve_ai_provider():
+    provider = AI_PROVIDER
+    if provider in ("gemini", "cursor"):
+        return provider
+    if GEMINI_API_KEY:
+        return "gemini"
+    if CURSOR_API_KEY:
+        return "cursor"
+    return None
 
-    print("🤖 正在進行 AI 模型連線測試...")
+def _check_gemini_health():
+    global HAS_GENAI, AI_CLIENT, ACTIVE_AI_PROVIDER
     if not GEMINI_API_KEY:
         print("⚠️ 警告: 未設定 GEMINI_API_KEY")
-        HAS_GENAI = False
-        return
-
+        return False
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         for model_name in MODEL_CANDIDATES:
             try:
                 response = client.models.generate_content(model=model_name, contents="Hi")
                 if response and response.text:
-                    print(f"✅ AI 測試成功！將使用模型: {model_name}")
+                    print(f"✅ Gemini 測試成功！將使用模型: {model_name}")
                     HAS_GENAI = True
                     AI_CLIENT = client
-                    return
-            except Exception as model_err: 
+                    ACTIVE_AI_PROVIDER = "gemini"
+                    return True
+            except Exception:
                 continue
-        print("❌ 失敗: 所有候選模型皆無法連線。")
+        print("❌ 失敗: 所有 Gemini 候選模型皆無法連線。")
+        return False
+    except Exception:
+        return False
+
+def _check_cursor_health():
+    global HAS_GENAI, ACTIVE_AI_PROVIDER
+    if not CURSOR_API_KEY:
+        print("⚠️ 警告: 未設定 CURSOR_API_KEY")
+        return False
+    print(f"✅ Cursor API Key 已設定，將使用模型: {CURSOR_MODEL}")
+    HAS_GENAI = True
+    ACTIVE_AI_PROVIDER = "cursor"
+    return True
+
+def check_ai_health():
+    global HAS_GENAI, AI_CLIENT, ACTIVE_AI_PROVIDER
+
+    enable_ai_env = str(os.getenv("ENABLE_AI", "true")).lower() == "true"
+    if not enable_ai_env:
+        print("⏸️ [系統提示] 依據手動執行設定，本次工作不啟動 AI 服務，以節省 Token。")
         HAS_GENAI = False
-    except Exception as e:
+        ACTIVE_AI_PROVIDER = None
+        return
+
+    provider = _resolve_ai_provider()
+    if not provider:
+        print("⚠️ 警告: 未指定 AI_PROVIDER，且未設定任何 AI API Key")
         HAS_GENAI = False
+        ACTIVE_AI_PROVIDER = None
+        return
+
+    print(f"🤖 正在進行 AI 模型連線測試 (提供者: {provider})...")
+    if provider == "cursor":
+        _check_cursor_health()
+    else:
+        _check_gemini_health()
+
+def call_cursor_prompt(prompt, timeout=300):
+    if not CURSOR_API_KEY:
+        return None
+    auth = (CURSOR_API_KEY, "")
+    deadline = time.time() + timeout
+    try:
+        create_resp = requests.post(
+            f"{CURSOR_API_BASE}/agents",
+            auth=auth,
+            json={"prompt": {"text": prompt}, "model": {"id": CURSOR_MODEL}},
+            timeout=30,
+        )
+        if create_resp.status_code >= 400:
+            print(f"❌ Cursor API 建立失敗 ({create_resp.status_code}): {create_resp.text[:300]}")
+            return None
+
+        payload = create_resp.json()
+        agent_id = payload.get("agent", {}).get("id")
+        run_id = payload.get("run", {}).get("id")
+        if not agent_id or not run_id:
+            print("❌ Cursor API 回傳缺少 agent/run ID")
+            return None
+
+        status = "CREATING"
+        run_data = {}
+        while time.time() < deadline:
+            run_resp = requests.get(
+                f"{CURSOR_API_BASE}/agents/{agent_id}/runs/{run_id}",
+                auth=auth,
+                timeout=30,
+            )
+            if run_resp.status_code >= 400:
+                print(f"❌ Cursor API 查詢失敗 ({run_resp.status_code}): {run_resp.text[:300]}")
+                return None
+
+            run_data = run_resp.json()
+            status = str(run_data.get("status", "")).upper()
+            if status in CURSOR_TERMINAL_STATUSES:
+                break
+            time.sleep(2)
+
+        if status not in CURSOR_TERMINAL_STATUSES:
+            print(f"❌ Cursor API 逾時 (run: {run_id})")
+            return None
+        if status != "FINISHED":
+            print(f"❌ Cursor Agent 執行失敗 ({status}, run: {run_id})")
+            return None
+
+        result_text = (run_data.get("result") or "").strip()
+        if not result_text:
+            print("❌ Cursor API 回傳空白內容")
+            return None
+
+        GLOBAL_TOKEN_BILLING["api_calls"] += 1
+        return result_text
+    except requests.RequestException as e:
+        print(f"❌ Cursor API 網路錯誤: {e}")
+        return None
+
+def generate_ai_content(prompt, preserve_newlines=False):
+    if not HAS_GENAI:
+        return None
+    if ACTIVE_AI_PROVIDER == "cursor":
+        return call_cursor_prompt(prompt)
+    if ACTIVE_AI_PROVIDER == "gemini" and AI_CLIENT:
+        for model_name in MODEL_CANDIDATES:
+            try:
+                response = AI_CLIENT.models.generate_content(model=model_name, contents=prompt)
+                record_token_usage(response)
+                if not response or not response.text:
+                    continue
+                text = response.text.strip()
+                return text if preserve_newlines else text.replace('\n', ' ').strip()
+            except Exception:
+                time.sleep(1)
+                continue
+    return None
 
 check_ai_health()
 
@@ -98,6 +214,27 @@ def get_line_quota_report():
         alert_tag = "🟢 安全" if remaining_quota > 50 else ("🟡 偏低" if remaining_quota > 15 else "🚨 嚴重不足")
         return f"📊 ── LINE 本月額度診斷 ──\n🔹 當月免費總量：{total_limit} 則\n🔹 本月已發送量：{total_consumed} 則\n🔹 目前剩餘額度：{remaining_quota} 則 [{alert_tag}]"
     except: return "⚠️ LINE 額度查詢失敗"
+
+def get_ai_provider_label():
+    if ACTIVE_AI_PROVIDER == "cursor":
+        return "Cursor API"
+    if ACTIVE_AI_PROVIDER == "gemini":
+        return "Gemini API"
+    return "AI API"
+
+def get_ai_cost_report_html():
+    provider_label = get_ai_provider_label()
+    if ACTIVE_AI_PROVIDER == "cursor":
+        return (
+            f"<p><b>【{provider_label} 帳單】</b><br>"
+            f"- AI 呼叫總次數：<span style='color:#d9480f;'>{GLOBAL_TOKEN_BILLING['api_calls']}</span><br>"
+            f"- 詳細費用請至 <a href='https://cursor.com/dashboard'>Cursor Dashboard</a> 查看</p>"
+        )
+    return (
+        f"<p><b>【{provider_label} 帳單】</b><br>"
+        f"- 消耗總 Tokens：<span style='color:#d9480f;'>{GLOBAL_TOKEN_BILLING['total_tokens']:,}</span><br>"
+        f"- 預估台幣費用：<span style='color:#c92a2a;'><b>NT$ {calculate_twd_cost()} 元</b></span></p>"
+    )
 
 def calculate_twd_cost():
     USD_PER_M_INPUT, USD_PER_M_OUTPUT, FX_USD_TO_TWD = 0.075, 0.30, 32.5      
@@ -281,28 +418,23 @@ def get_limit_up_potential(r):
     if r['d1'] > 0.03: score += 20; reasons.append("🚀長紅棒")
     return score, " | ".join(reasons)
 
-def get_gemini_strategy(data):
+def get_ai_strategy(data):
     if data.get('skip_ai'): return "⏸️ 已手動關閉 AI 分析"
-    if not HAS_GENAI or not AI_CLIENT: return "AI 服務暫停"
+    if not HAS_GENAI: return "AI 服務暫停"
     
     profit_info = "目前無庫存，純觀察"
     if data['is_hold']:
         roi = ((data['p'] - data['cost']) / data['cost']) * 100
         profit_info = f"🔴庫存持有中 (成本:{data['cost']} | 現價:{data['p']} | 損益:{roi:+.2f}%)"
     prompt = f"針對個股 {data['name']} ({data['id']}) 進行短線診斷。現價：{data['p']}，5日線: {data['ma5']}，20日線: {data['ma20']}。{profit_info}。請給出約 80 字操作建議與明確防守價。"
-    for model_name in MODEL_CANDIDATES:
-        try:
-            response = AI_CLIENT.models.generate_content(model=model_name, contents=prompt)
-            record_token_usage(response)  
-            return response.text.replace('\n', ' ').strip()
-        except: time.sleep(1); continue
-    return "AI 連線忙碌中"
+    result = generate_ai_content(prompt)
+    return result if result else "AI 連線忙碌中"
 
 # ==========================================
 # 5. ✨ 全域戰略報告生成器
 # ==========================================
 def generate_and_save_summary(data_list, report_time_str):
-    if not HAS_GENAI or not AI_CLIENT: return "本次報告未包含 AI 總結"
+    if not HAS_GENAI: return "本次報告未包含 AI 總結"
     
     inventory_txt, watchlist_txt = "", ""
     golden_candidates, limit_up_candidates_txt, long_term_candidates_txt = "", "", ""
@@ -406,15 +538,8 @@ def generate_and_save_summary(data_list, report_time_str):
     請嚴格依照以上章節輸出（繁體中文），並保留所有特殊符號。
     """
 
-    for model_name in MODEL_CANDIDATES:
-        try:
-            response = AI_CLIENT.models.generate_content(model=model_name, contents=prompt)
-            record_token_usage(response)  
-            return response.text
-        except:
-            time.sleep(2)
-            continue
-    return "AI 生成總結報告失敗"
+    result = generate_ai_content(prompt, preserve_newlines=True)
+    return result if result else "AI 生成總結報告失敗"
 
 # ==========================================
 # 6. 行情數據抓取核心
@@ -525,7 +650,7 @@ def fetch_pro_metrics(stock_data):
         elif score >= 8: res["hint"] = "🚀強勢進攻"
         else: res["hint"] = "👀持續追蹤"
         
-        res['ai_strategy'] = get_gemini_strategy(res)
+        res['ai_strategy'] = get_ai_strategy(res)
         return res
     except: return None
 
@@ -576,13 +701,18 @@ def main():
         
         twd_cost = calculate_twd_cost()
         line_quota_report = get_line_quota_report()
+        provider_label = get_ai_provider_label()
 
         print("\n==========================================")
         print("💰 本次代碼工作 AI 運作成本結算報告")
         print(f"🔹 執行時間：{current_time}")
+        print(f"🔹 AI 提供者：{provider_label}")
         print(f"🔹 AI API 呼叫總次數：{GLOBAL_TOKEN_BILLING['api_calls']} 次")
-        print(f"🔹 總消耗 Tokens：{GLOBAL_TOKEN_BILLING['total_tokens']:,}")
-        print(f"🔹 預估本次花費台幣：NT$ {twd_cost} 元")
+        if ACTIVE_AI_PROVIDER == "cursor":
+            print("🔹 詳細 Cursor 費用請至 Cursor Dashboard 查看")
+        else:
+            print(f"🔹 總消耗 Tokens：{GLOBAL_TOKEN_BILLING['total_tokens']:,}")
+            print(f"🔹 預估本次花費台幣：NT$ {twd_cost} 元")
         print("==========================================\n")
         
         try:
@@ -607,13 +737,17 @@ def main():
         except Exception as e: print(f"⚠️ 建立圖2排版戰略分頁失敗: {e}")
 
         line_quota_html = line_quota_report.replace('\n', '<br>')
-        cost_report_html = f"<div style='background-color:#fff9db; padding:15px; border-left:5px solid #fcc419; margin-top:20px; font-family:sans-serif;'><h3 style='margin-top:0; color:#e67e22;'>💰 今日運作成本診斷報告</h3><p><b>【雲端主報表連結】</b><br>- 🔗 <a href='{report_sheet_url}'>點擊前往查看數據報表</a></p><p><b>【Gemini API 帳單】</b><br>- 消耗總 Tokens：<span style='color:#d9480f;'>{GLOBAL_TOKEN_BILLING['total_tokens']:,}</span><br>- 預估台幣費用：<span style='color:#c92a2a;'><b>NT$ {twd_cost} 元</b></span></p><p style='margin-bottom:0;'><b>【LINE Bot 免費額度】</b><br>{line_quota_html}</p></div>"
+        cost_report_html = f"<div style='background-color:#fff9db; padding:15px; border-left:5px solid #fcc419; margin-top:20px; font-family:sans-serif;'><h3 style='margin-top:0; color:#e67e22;'>💰 今日運作成本診斷報告</h3><p><b>【雲端主報表連結】</b><br>- 🔗 <a href='{report_sheet_url}'>點擊前往查看數據報表</a></p>{get_ai_cost_report_html()}<p style='margin-bottom:0;'><b>【LINE Bot 免費額度】</b><br>{line_quota_html}</p></div>"
 
         email_body = f"<html><body><h2>📊 {current_time} 提前攔截戰略報告</h2><pre style='font-family:sans-serif; white-space:pre-wrap;'>{summary_text}</pre><hr>{cost_report_html}</body></html>"
         send_email(f"[{current_time}] 台股 AI 初升段戰報 (附成本與 LINE 額度)", email_body)
 
         if LINE_ACCESS_TOKEN:
-            line_msg = f"📊 【{current_time} 戰略報告已更新】\n\n全新【提前攔截初升段】引擎已發動！AI 總監已為您優先從底部潛伏與剛突破的標的中進行精選。\n\n🔗 點擊直達雲端主報表：\n{report_sheet_url}\n\n── 💸 今日 AI 帳單明細 ──\n🔹 總消耗 Tokens：{GLOBAL_TOKEN_BILLING['total_tokens']:,}\n💰 今日預估費用：NT$ {twd_cost} 元\n\n{line_quota_report}"
+            if ACTIVE_AI_PROVIDER == "cursor":
+                ai_bill_text = f"── 💸 今日 AI 帳單明細 ──\n🔹 AI 提供者：{provider_label}\n🔹 AI 呼叫次數：{GLOBAL_TOKEN_BILLING['api_calls']}\n💰 詳細費用請至 Cursor Dashboard 查看"
+            else:
+                ai_bill_text = f"── 💸 今日 AI 帳單明細 ──\n🔹 AI 提供者：{provider_label}\n🔹 總消耗 Tokens：{GLOBAL_TOKEN_BILLING['total_tokens']:,}\n💰 今日預估費用：NT$ {twd_cost} 元"
+            line_msg = f"📊 【{current_time} 戰略報告已更新】\n\n全新【提前攔截初升段】引擎已發動！AI 總監已為您優先從底部潛伏與剛突破的標的中進行精選。\n\n🔗 點擊直達雲端主報表：\n{report_sheet_url}\n\n{ai_bill_text}\n\n{line_quota_report}"
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
             payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": line_msg}]}
             requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)

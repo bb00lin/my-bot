@@ -1,16 +1,22 @@
 name: DailyStockPush
 
 on:
-  # ⚡ [已暫時取消] 移除 cron 定時排程，全面改由 DailyStockBot 串接執行，防範重複觸發浪費 Token
-  workflow_dispatch: # 🚀 保留手動觸發功能，方便您隨時在 GitHub 網頁上手動測試執行
+  # ⚡ 自動排程觸發時一律使用 Cursor API（見下方 env 邏輯）
+  # schedule:
+  #   - cron: '20 08 * * 1-5' # 台北時間 16:20 執行 (UTC 08:20)
+  workflow_dispatch:
     inputs:
-      enable_ai:
-        description: '🤖 啟動 AI 診斷服務 (消耗 Gemini Token)'
+      enable_gemini_ai:
+        description: '🤖 啟動 Gemini AI 診斷服務 (消耗 Gemini Token)'
         type: boolean
         required: true
         default: false
-  # 💡 總監額外加上：如果您未來改用 repository_dispatch 讓機器人觸發，這可以當作另一條專用通道
-  repository_dispatch: 
+      enable_cursor_ai:
+        description: '🤖 啟動 Cursor AI 診斷服務 (消耗 Cursor Token)'
+        type: boolean
+        required: true
+        default: false
+  repository_dispatch:
     types: [trigger-push]
 
 permissions:
@@ -22,13 +28,21 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4 # 🚀 升級至 v4，支援最新 Node.js 環境
+        uses: actions/checkout@v4
+
+      - name: Validate AI provider selection
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ "${{ github.event.inputs.enable_gemini_ai }}" = "true" ] && [ "${{ github.event.inputs.enable_cursor_ai }}" = "true" ]; then
+            echo "❌ 請只勾選 Gemini 或 Cursor 其中一項，不可同時勾選"
+            exit 1
+          fi
 
       - name: Set up Python
-        uses: actions/setup-python@v5 # 🚀 升級至 v5
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip' # ⚡ [全新優化] 開啟 pip 快取，免重新下載相同套件，大幅縮短執行時間
+          cache: 'pip'
 
       - name: Install Dependencies
         run: |
@@ -37,12 +51,14 @@ jobs:
 
       - name: Run DailyStockPush
         env:
-          # 核心魔法：只要不是您「手動點擊 (workflow_dispatch)」，系統一律視為「自動排程/遠端觸發」並強制開啟 AI
-          # 若是手動點擊，則以您勾選的狀態 (inputs.enable_ai) 為準，預設為 false
-          ENABLE_AI: ${{ github.event_name != 'workflow_dispatch' && 'true' || github.event.inputs.enable_ai }}
+          # 手動觸發：依勾選決定是否啟用 AI 與提供者 (二選一或都不勾)
+          # 自動排程 / repository_dispatch：一律啟用 Cursor API
+          ENABLE_AI: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.enable_gemini_ai == 'true' || github.event.inputs.enable_cursor_ai == 'true') && 'true' || (github.event_name != 'workflow_dispatch' && 'true' || 'false') }}
+          AI_PROVIDER: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.enable_cursor_ai == 'true' && 'cursor' || (github.event.inputs.enable_gemini_ai == 'true' && 'gemini' || '')) || 'cursor' }}
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
