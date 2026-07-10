@@ -1,0 +1,18 @@
+# Python virtual environment
+.venv/
+venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local runtime artifacts / logs
+execution_log.txt
+output.txt
+*.log
+
+# Screenshots produced by Selenium bots
+Screenshots_*.zip
+Search_*.zip
+mix_screenshots*.zip
