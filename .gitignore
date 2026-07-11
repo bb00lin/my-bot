@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+execution_log.txt
+credentials.json
+jira_config.txt
