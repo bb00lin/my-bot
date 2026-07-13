@@ -1,0 +1,52 @@
+# 複製為 config.yaml 並填入實際值；API Token 建議放在 .env
+
+atlassian:
+  site_url: "https://qsiaiot.atlassian.net"
+  cloud_id: "2657b5c5-bbc7-4469-9e06-6bc58db3de73"
+  email: "your.email@company.com"
+  # api_token 請設在 .env：ATLASSIAN_API_TOKEN=...
+
+sharepoint:
+  # Sync 腳本下載 Excel 用（必須是 download.aspx）
+  download_url: "https://qsitw-my.sharepoint.com/:x:/r/personal/challo_chen_qsitw_com/_layouts/15/download.aspx?share=IQAyqQjNe2bmSp28QrFpnf_sAbL5gqBzp6h3RSCwPKx2cbY"
+  # Confluence 頁首 S 表連結：瀏覽器開啟網頁版（由 share token 轉成 :x:/g/personal/... 形式）
+  view_url: "https://qsitw-my.sharepoint.com/:x:/g/personal/challo_chen_qsitw_com/IQAyqQjNe2bmSp28QrFpnf_sAbL5gqBzp6h3RSCwPKx2cbY"
+  sheet_name: "Register"
+
+confluence:
+  page_id: "189300768"
+  page_title: "mail_checking"
+  version_message: "Synced from SharePoint register"
+  # 頁首「立即同步」：指向 GitHub Actions 手動執行頁（勿把 PAT / webhook secret 寫進 URL）
+  # 格式：https://github.com/<OWNER>/<REPO>/actions/workflows/sync-register.yml
+  sync_action_url: "https://github.com/bb00lin/my-bot/actions/workflows/sync-register.yml"
+  sync_action_title: "立即同步"
+
+jira:
+  project_key: "PMWC"
+  epic_issue_type: "大型工作"
+  task_issue_type: "任務"
+  # PMWC team-managed：Start date = customfield_10015，Due date = duedate
+  start_date_field: "customfield_10015"
+  due_date_field: "duedate"
+  # 未指派時預設受託人
+  default_assignee_account_id: "712020:a50a0ee0-1928-47a7-a135-a07c21c233ce"
+  default_assignee_query: "shannon"
+
+# C 表格欄位 = S 表欄位（同順序）+ 最後 LINK 欄
+confluence_columns:
+  - ID
+  - JIRA
+  - Workstream
+  - Title
+  - Description / current state
+  - Next action
+  - Ball with
+  - Priority
+  - Status
+  - Opened
+  - Target close
+  - Next milestone / due
+  - Source / reference
+  - QSI Comment
+  - LINK

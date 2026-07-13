@@ -1,0 +1,6 @@
+﻿# PMWC register sync
+config.yaml
+.env
+.register_cache/
+logs/
+*.xlsx

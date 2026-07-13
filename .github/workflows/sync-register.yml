@@ -1,0 +1,61 @@
+# SharePoint → Confluence → Jira 同步
+# 主要排程：GitHub Actions cron（台灣 09:00 / 17:00）
+# 亦可：workflow_dispatch 手動、repository_dispatch
+name: Sync Register
+
+on:
+  schedule:
+    # Primary unattended schedule (Taiwan UTC+8)
+    # 09:00 → 01:00 UTC；17:00 → 09:00 UTC
+    - cron: "0 1 * * *"
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+  repository_dispatch:
+    types: [sync-register]
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        # 使用獨立檔案，避免覆寫 my-bot 既有 requirements.txt
+        run: pip install -r requirements-sync.txt
+
+      - name: Prepare config.yaml
+        env:
+          CONFIG_YAML: ${{ secrets.CONFIG_YAML }}
+        run: |
+          if [ -n "$CONFIG_YAML" ]; then
+            printf '%s\n' "$CONFIG_YAML" > config.yaml
+            echo "Wrote config.yaml from CONFIG_YAML secret."
+          elif [ -f config.yaml ]; then
+            echo "Using committed config.yaml."
+          else
+            echo "::error::缺少 config.yaml。請設定 GitHub Secret CONFIG_YAML（完整 YAML 內容），或將不含密鑰的 config.yaml 提交至儲存庫。"
+            exit 1
+          fi
+
+      - name: Prepare Atlassian credentials
+        env:
+          ATLASSIAN_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
+        run: |
+          if [ -z "$ATLASSIAN_API_TOKEN" ]; then
+            echo "::error::缺少 Secret ATLASSIAN_API_TOKEN"
+            exit 1
+          fi
+          echo "ATLASSIAN_API_TOKEN=$ATLASSIAN_API_TOKEN" > .env
+
+      - name: Run sync_register.py
+        run: python sync_register.py
