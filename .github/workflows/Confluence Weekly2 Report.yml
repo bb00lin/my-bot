@@ -13,21 +13,21 @@ jobs:
     steps:
     # 1. 下載程式碼
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     # 2. 設定 Python 環境
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.9'
+        python-version: '3.10'
 
-    # 3. 安裝套件 (從 requirements.txt 讀取，確保裝好 bs4)
+    # 3. 安裝套件（confluence_api2.py 僅需 requests + beautifulsoup4）
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install requests beautifulsoup4
 
-    # 4. 執行自動化腳本 (防假成功機制)
+    # 4. 執行自動化腳本（tee 確保 log 寫入；pipefail 保留失敗狀態）
     - name: Run Confluence Script
       id: run_script
       env:
@@ -35,8 +35,8 @@ jobs:
         CONF_USER: ${{ secrets.CONF_USER }}
         CONF_PASS: ${{ secrets.CONF_PASS }}
       run: |
-        python confluence_api2.py > output.txt 2>&1 || { cat output.txt; exit 1; }
-        cat output.txt
+        set -o pipefail
+        python confluence_api2.py 2>&1 | tee output.txt
 
     # 5. 發送成功信件 [Done]
     - name: Send Success Email
@@ -53,7 +53,15 @@ jobs:
         from: GitHub Automation <${{ secrets.MAIL_USERNAME }}>
         body: file://output.txt
 
-    # 6. 發送失敗信件 [Fail] (附帶 Error Log)
+    # 6. 若 output.txt 不存在（例如安裝階段已失敗），建立占位 log
+    - name: Ensure failure log exists
+      if: failure()
+      run: |
+        if [ ! -f output.txt ]; then
+          echo "No script output — job likely failed before Run Confluence Script (e.g. dependency install)." > output.txt
+        fi
+
+    # 7. 發送失敗信件 [Fail]（附帶 Error Log）
     - name: Send Failure Email
       if: failure()
       uses: dawidd6/action-send-mail@v3
