@@ -148,22 +148,52 @@ JIRA_ISSUETYPE_JQL_ALIASES: dict[str, str] = {
 }
 
 
+def _jql_quote(value: str) -> str:
+    """Quote a JQL string literal; escape reserved wildcards."""
+    escaped = (
+        (value or "")
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("?", "\\u003f")
+        .replace("*", "\\u002a")
+    )
+    return f'"{escaped}"'
+
+
 def jql_issuetype_equals(type_name: str) -> str:
     """產生單一 issuetype JQL 條件。"""
     name = (type_name or "").strip()
-    if name.isascii() and " " not in name and "-" not in name:
+    if not name:
+        raise ValueError("issuetype name is empty")
+    # ASCII simple tokens only — never leave ?/* unquoted (JQL wildcards).
+    if (
+        name.isascii()
+        and " " not in name
+        and "-" not in name
+        and "?" not in name
+        and "*" not in name
+    ):
         return f"issuetype = {name}"
-    return f'issuetype = "{name}"'
+    return f"issuetype = {_jql_quote(name)}"
 
 
 def jql_issuetype_name_candidates(type_name: str) -> list[str]:
-    """回傳 JQL 要嘗試的類型名稱清單（設定值 + 別名）。"""
+    """回傳 JQL 要嘗試的類型名稱清單（設定值 + 別名 + 英文 fallback）。"""
     name = (type_name or "").strip()
-    candidates = [name] if name else []
+    candidates: list[str] = []
+    # Skip clearly corrupted names (e.g. secret encoding lost Chinese → ???)
+    if name and set(name) != {"?"}:
+        candidates.append(name)
     alias = JIRA_ISSUETYPE_JQL_ALIASES.get(name)
     if alias and alias not in candidates:
         candidates.append(alias)
+    # CI/config mojibake fallback: still try common English types.
+    if not candidates or "?" in name:
+        for eng in ("Task", "Epic"):
+            if eng not in candidates:
+                candidates.append(eng)
     return candidates
+
 
 
 @dataclass
