@@ -179,17 +179,15 @@ def jql_issuetype_equals(type_name: str) -> str:
 
 
 def resolve_issuetype_for_api(type_name: str, *, role: str) -> str:
-    """Map config issue type to a name Jira API accepts.
+    """Normalize config issue type for Jira create/search.
 
-    Prefer English aliases for team-managed projects. If CONFIG_YAML lost
-    Chinese characters (???), fall back to Task/Epic by role.
+    PMWC issue types are Chinese (任務 / 大型工作). If CONFIG_YAML encoding
+    damage turns them into ???, restore the project defaults by role.
+    Do NOT remap valid Chinese names to English — create API rejects Task/Epic.
     """
     name = (type_name or "").strip()
-    alias = JIRA_ISSUETYPE_JQL_ALIASES.get(name)
-    if alias:
-        return alias
     if not name or "?" in name:
-        return "Task" if role == "task" else "Epic"
+        return "任務" if role == "task" else "大型工作"
     return name
 
 
@@ -205,9 +203,9 @@ def jql_issuetype_name_candidates(type_name: str) -> list[str]:
         candidates.append(alias)
     # CI/config mojibake fallback: still try common English types.
     if not candidates or "?" in name:
-        for eng in ("Task", "Epic"):
-            if eng not in candidates:
-                candidates.append(eng)
+        for zh in ("任務", "大型工作", "Task", "Epic"):
+            if zh not in candidates:
+                candidates.append(zh)
     return candidates
 
 
