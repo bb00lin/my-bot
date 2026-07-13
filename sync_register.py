@@ -10,10 +10,13 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
 import re
+import smtplib
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
@@ -571,6 +574,8 @@ def format_diff_report(diff: RegisterDiff, *, dry_run: bool = False) -> str:
         lines.append(f"【首次快照】目前 S 表格共 {len(diff.added_ids)} 筆有效 ID")
         for rid in diff.added_ids:
             lines.append(f"  • {rid}")
+        lines.append("")
+        lines.append("【結論】首次執行，僅建立基準快照（尚無前後差異可比）。")
         return "\n".join(lines)
 
     lines.append(f"【新增】{len(diff.added_ids)} 筆")
@@ -619,9 +624,183 @@ def format_diff_report(diff: RegisterDiff, *, dry_run: bool = False) -> str:
     )
     lines.append("")
     if total == 0:
-        lines.append("本次 S 表格與上次快照完全相同，無任何變更。")
+        lines.append("【結論】無差異")
+        lines.append("本次 S 表格與上次快照完全相同，無任何變更（含狀態）。")
+    else:
+        lines.append(f"【結論】有差異（共 {total} 項變更）")
 
     return "\n".join(lines)
+
+
+def diff_has_changes(diff: RegisterDiff) -> bool:
+    if diff.is_first_run:
+        return False
+    return bool(
+        diff.added_ids
+        or diff.removed_ids
+        or diff.status_changes
+        or diff.field_changes
+    )
+
+
+def write_sync_log(
+    log_dir: Path,
+    diff: RegisterDiff,
+    diff_text: str,
+    report: SyncReport,
+) -> Path:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = log_dir / f"sync_{timestamp}.log"
+    content = "\n\n".join([diff_text, _format_sync_result_section(report)])
+    log_path.write_text(content + "\n", encoding="utf-8")
+
+    # 固定檔名，方便本機／自動化取用
+    latest_path = log_dir / "latest_diff.txt"
+    latest_path.write_text(content + "\n", encoding="utf-8")
+    root_latest = SCRIPT_DIR / "最新同步差異.txt"
+    root_latest.write_text(content + "\n", encoding="utf-8")
+
+    summary_path = log_dir / "sync_log.txt"
+    summary_line = (
+        f"{datetime.now().isoformat(timespec='seconds')} | {log_path.name} | "
+        f"新增={len(diff.added_ids)} 移除={len(diff.removed_ids)} "
+        f"狀態={len(diff.status_changes)} 欄位={len(diff.field_changes)} "
+        f"錯誤={len(report.errors)}\n"
+    )
+    with summary_path.open("a", encoding="utf-8") as f:
+        f.write(summary_line)
+
+    return log_path
+
+
+def is_github_actions() -> bool:
+    return os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+
+
+def build_diff_email_body(
+    diff_text: str,
+    report: SyncReport,
+    *,
+    s_link_url: str = "",
+    s_link_title: str = "",
+    confluence_url: str = "",
+) -> str:
+    lines = [
+        "PMWC Register 同步差異報告",
+        f"時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"執行環境: {'GitHub Actions' if is_github_actions() else '本機'}",
+        "",
+    ]
+    if s_link_url:
+        lines.append(f"S 表格連結: {s_link_title or 'SharePoint Register'}")
+        lines.append(s_link_url)
+        lines.append("")
+    if confluence_url:
+        lines.append(f"C 表格 (Confluence): {confluence_url}")
+        lines.append("")
+    lines.append(diff_text)
+    lines.append("")
+    lines.append(_format_sync_result_section(report))
+    return "\n".join(lines)
+
+
+def send_diff_email(
+    cfg: dict[str, Any],
+    *,
+    subject: str,
+    body: str,
+) -> None:
+    """透過 SMTP 寄出差異報告（GitHub Secrets: MAIL_USERNAME / MAIL_PASSWORD）。"""
+    notify = cfg.get("notify") or {}
+    to_addr = (
+        os.environ.get("SYNC_NOTIFY_EMAIL")
+        or notify.get("email_to")
+        or "bob.lin@qsitw.com"
+    ).strip()
+    user = (
+        os.environ.get("MAIL_USERNAME")
+        or notify.get("smtp_user")
+        or ""
+    ).strip()
+    password = (
+        os.environ.get("MAIL_PASSWORD")
+        or notify.get("smtp_password")
+        or ""
+    ).strip()
+    host = (
+        os.environ.get("SMTP_HOST")
+        or notify.get("smtp_host")
+        or "smtp.office365.com"
+    ).strip()
+    port = int(os.environ.get("SMTP_PORT") or notify.get("smtp_port") or 587)
+    from_addr = (notify.get("email_from") or user or to_addr).strip()
+
+    if not user or not password:
+        raise RuntimeError(
+            "寄信失敗：缺少 MAIL_USERNAME / MAIL_PASSWORD（或 notify.smtp_*）"
+        )
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = from_addr
+    msg["To"] = to_addr
+    msg.set_content(body)
+
+    with smtplib.SMTP(host, port, timeout=60) as smtp:
+        smtp.starttls()
+        smtp.login(user, password)
+        smtp.send_message(msg)
+
+
+def deliver_diff_report(
+    cfg: dict[str, Any],
+    log_dir: Path,
+    register_diff: RegisterDiff,
+    report: SyncReport,
+    *,
+    dry_run: bool,
+    s_link_url: str = "",
+    s_link_title: str = "",
+    confluence_url: str = "",
+) -> str:
+    """同步後必做：寫入本機差異檔；GitHub Actions 另寄郵件（無差異也寄）。"""
+    diff_text = print_diff_report(register_diff, dry_run=dry_run)
+    report.diff_log_path = write_sync_log(log_dir, register_diff, diff_text, report)
+    print(f"變更紀錄已寫入: {report.diff_log_path}")
+    print(f"最新差異副本: {SCRIPT_DIR / '最新同步差異.txt'}")
+
+    notify = cfg.get("notify") or {}
+    send_mail = bool(notify.get("email_on_github", True)) and is_github_actions()
+    if notify.get("email_always"):
+        send_mail = True
+    if dry_run:
+        send_mail = False
+
+    if send_mail:
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        if register_diff.is_first_run:
+            verdict = "首次快照"
+        elif diff_has_changes(register_diff):
+            verdict = "有差異"
+        else:
+            verdict = "無差異"
+        subject = f"[PMWC Sync] {verdict} — {stamp}"
+        body = build_diff_email_body(
+            diff_text,
+            report,
+            s_link_url=s_link_url,
+            s_link_title=s_link_title,
+            confluence_url=confluence_url,
+        )
+        try:
+            send_diff_email(cfg, subject=subject, body=body)
+            print(f"差異報告已寄出: {subject}")
+        except Exception as exc:  # noqa: BLE001
+            report.errors.append(f"寄送差異郵件: {exc}")
+            print(f"警告: 寄送差異郵件失敗: {exc}")
+
+    return diff_text
 
 
 def _format_sync_result_section(report: SyncReport) -> str:
@@ -649,31 +828,6 @@ def _format_sync_result_section(report: SyncReport) -> str:
         for err in report.errors:
             lines.append(f"  - {err}")
     return "\n".join(lines)
-
-
-def write_sync_log(
-    log_dir: Path,
-    diff: RegisterDiff,
-    diff_text: str,
-    report: SyncReport,
-) -> Path:
-    log_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = log_dir / f"sync_{timestamp}.log"
-    content = "\n\n".join([diff_text, _format_sync_result_section(report)])
-    log_path.write_text(content + "\n", encoding="utf-8")
-
-    summary_path = log_dir / "sync_log.txt"
-    summary_line = (
-        f"{datetime.now().isoformat(timespec='seconds')} | {log_path.name} | "
-        f"新增={len(diff.added_ids)} 移除={len(diff.removed_ids)} "
-        f"狀態={len(diff.status_changes)} 欄位={len(diff.field_changes)} "
-        f"錯誤={len(report.errors)}\n"
-    )
-    with summary_path.open("a", encoding="utf-8") as f:
-        f.write(summary_line)
-
-    return log_path
 
 
 def print_diff_report(diff: RegisterDiff, *, dry_run: bool = False) -> str:
@@ -1892,9 +2046,16 @@ def run_sync(config_path: Path, dry_run: bool) -> SyncReport:
         report.errors.append(msg)
         print(f"警告: {msg}")
         print("Confluence 未更新（需先補齊 JIRA）。")
-        diff_text = print_diff_report(register_diff, dry_run=dry_run)
-        report.diff_log_path = write_sync_log(log_dir, register_diff, diff_text, report)
-        print(f"變更紀錄已寫入: {report.diff_log_path}")
+        deliver_diff_report(
+            cfg,
+            log_dir,
+            register_diff,
+            report,
+            dry_run=dry_run,
+            s_link_url=source_link_url,
+            s_link_title=source_link_title,
+            confluence_url=confluence_page_url,
+        )
         return report
 
     page_body = build_confluence_page_html(
@@ -1920,13 +2081,20 @@ def run_sync(config_path: Path, dry_run: bool) -> SyncReport:
         dry_run,
     )
 
-    diff_text = print_diff_report(register_diff, dry_run=dry_run)
-    report.diff_log_path = write_sync_log(log_dir, register_diff, diff_text, report)
-    print(f"變更紀錄已寫入: {report.diff_log_path}")
-
-    if not dry_run and report.confluence_updated:
+    if not dry_run:
         save_last_snapshot(snapshot_path, s_rows)
         print(f"已更新快照: {snapshot_path}")
+
+    deliver_diff_report(
+        cfg,
+        log_dir,
+        register_diff,
+        report,
+        dry_run=dry_run,
+        s_link_url=source_link_url,
+        s_link_title=source_link_title,
+        confluence_url=confluence_page_url,
+    )
 
     return report
 

@@ -9,6 +9,16 @@ atlassian:
 # 寂靜寫入：Jira ?notifyUsers=false；Confluence version.minorEdit=true
 silent_mode: true
 
+# 同步後差異報告
+# - 本機：寫入 logs/sync_*.log、logs/latest_diff.txt、最新同步差異.txt（無差異也會寫「無差異」）
+# - GitHub Actions：寄信（無差異也寄），並附 S 表格連結
+notify:
+  email_to: "bob.lin@qsitw.com"
+  email_on_github: true
+  # email_always: false
+  # smtp_host: "smtp.office365.com"
+  # smtp_port: 587
+
 sharepoint:
   # Sync 腳本下載 Excel 用（必須是 download.aspx）
   download_url: "https://qsitw-my.sharepoint.com/:x:/r/personal/challo_chen_qsitw_com/_layouts/15/download.aspx?share=IQAyqQjNe2bmSp28QrFpnf_sAbL5gqBzp6h3RSCwPKx2cbY"

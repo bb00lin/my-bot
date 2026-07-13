@@ -33,6 +33,14 @@ jobs:
         # 使用獨立檔案，避免覆寫 my-bot 既有 requirements.txt
         run: pip install -r requirements-sync.txt
 
+      - name: Restore register snapshot cache
+        uses: actions/cache@v4
+        with:
+          path: .register_cache
+          key: register-snapshot-${{ github.repository }}-${{ github.run_id }}
+          restore-keys: |
+            register-snapshot-${{ github.repository }}-
+
       - name: Prepare config.yaml
         env:
           CONFIG_YAML: ${{ secrets.CONFIG_YAML }}
@@ -58,4 +66,21 @@ jobs:
           echo "ATLASSIAN_API_TOKEN=$ATLASSIAN_API_TOKEN" > .env
 
       - name: Run sync_register.py
+        env:
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SYNC_NOTIFY_EMAIL: ${{ secrets.SYNC_NOTIFY_EMAIL }}
         run: python sync_register.py
+
+      - name: Upload diff artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-diff-${{ github.run_id }}
+          path: |
+            logs/
+            最新同步差異.txt
+          if-no-files-found: warn
+          retention-days: 30

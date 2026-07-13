@@ -742,6 +742,52 @@ def main() -> int:
 
 
 
+
+    # 11b. Diff report formatting / email body
+    empty_diff = sr.RegisterDiff(snapshot_saved_at="2026-07-10T10:00:00")
+    empty_report_text = sr.format_diff_report(empty_diff)
+    check(
+        "Diff report conclusion no change",
+        "【結論】無差異" in empty_report_text,
+        empty_report_text[-120:],
+    )
+
+    status_diff = sr.RegisterDiff(
+        status_changes=[
+            sr.FieldChange(
+                register_id="RF-01",
+                field_label="Status",
+                old_value="Open",
+                new_value="Closed",
+            )
+        ],
+        snapshot_saved_at="2026-07-10T10:00:00",
+    )
+    status_report_text = sr.format_diff_report(status_diff)
+    check(
+        "Diff report shows status section",
+        "【狀態變更】" in status_report_text
+        and "RF-01" in status_report_text
+        and "Open" in status_report_text
+        and "Closed" in status_report_text
+        and "【結論】有差異" in status_report_text,
+        status_report_text,
+    )
+
+    email_body = sr.build_diff_email_body(
+        empty_report_text,
+        sr.SyncReport(),
+        s_link_url="https://example.com/register.xlsx",
+        s_link_title="SharePoint Register",
+        confluence_url="https://confluence.example/page",
+    )
+    check(
+        "Diff email body includes S link",
+        "https://example.com/register.xlsx" in email_body
+        and "SharePoint Register" in email_body,
+        email_body[:200],
+    )
+
     # 12. Excel download + parse
 
     print("\n--- SharePoint Excel 下載測試 ---")
