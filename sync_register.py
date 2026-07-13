@@ -177,6 +177,22 @@ def jql_issuetype_equals(type_name: str) -> str:
     return f"issuetype = {_jql_quote(name)}"
 
 
+
+def resolve_issuetype_for_api(type_name: str, *, role: str) -> str:
+    """Map config issue type to a name Jira API accepts.
+
+    Prefer English aliases for team-managed projects. If CONFIG_YAML lost
+    Chinese characters (???), fall back to Task/Epic by role.
+    """
+    name = (type_name or "").strip()
+    alias = JIRA_ISSUETYPE_JQL_ALIASES.get(name)
+    if alias:
+        return alias
+    if not name or "?" in name:
+        return "Task" if role == "task" else "Epic"
+    return name
+
+
 def jql_issuetype_name_candidates(type_name: str) -> list[str]:
     """回傳 JQL 要嘗試的類型名稱清單（設定值 + 別名 + 英文 fallback）。"""
     name = (type_name or "").strip()
@@ -1590,8 +1606,12 @@ def sync_jira_for_rows(
     web_link_title: str,
 ) -> dict[str, str]:
     project = cfg["jira"]["project_key"]
-    epic_type = cfg["jira"]["epic_issue_type"]
-    task_type = cfg["jira"]["task_issue_type"]
+    epic_type = resolve_issuetype_for_api(
+        cfg["jira"]["epic_issue_type"], role="epic"
+    )
+    task_type = resolve_issuetype_for_api(
+        cfg["jira"]["task_issue_type"], role="task"
+    )
 
     epic_map = load_epic_map(client, project, epic_type)
     issue_index = load_jira_register_index(client, project, task_type)
