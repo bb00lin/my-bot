@@ -787,15 +787,33 @@ def load_register_rows_from_excel(
 
 
 class AtlassianClient:
-    def __init__(self, site_url: str, cloud_id: str, email: str, api_token: str):
+    def __init__(
+        self,
+        site_url: str,
+        cloud_id: str,
+        email: str,
+        api_token: str,
+        *,
+        silent_mode: bool = True,
+    ):
         self.site_url = site_url.rstrip("/")
         self.cloud_id = cloud_id
+        self.silent_mode = silent_mode
         self.session = requests.Session()
         self.session.auth = (email, api_token)
         self.session.headers.update({"Accept": "application/json"})
         self.jira_base = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3"
         self.jira_agile_base = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/agile/1.0"
         self.confluence_v2 = f"https://api.atlassian.com/ex/confluence/{cloud_id}/wiki/api/v2"
+
+    def _jira_path(self, path: str, *, mutate: bool) -> str:
+        """寫入類 API 附加 notifyUsers=false（同 jira_gui_cursor 寂靜同步）。"""
+        if not mutate or not self.silent_mode:
+            return path
+        if "notifyUsers=" in path:
+            return path
+        sep = "&" if "?" in path else "?"
+        return f"{path}{sep}notifyUsers=false"
 
     def jira_get(self, path: str, **params: Any) -> Any:
         r = self.session.get(f"{self.jira_base}{path}", params=params, timeout=60)
@@ -818,9 +836,16 @@ class AtlassianClient:
         }
         if next_page_token:
             payload["nextPageToken"] = next_page_token
-        return self.jira_post("/search/jql", payload)
+        # 搜尋不需 notifyUsers
+        r = self.session.post(
+            f"{self.jira_base}/search/jql", json=payload, timeout=60
+        )
+        if not r.ok:
+            raise RuntimeError(f"Jira POST /search/jql failed: {r.status_code} {r.text}")
+        return r.json() if r.text else {}
 
     def jira_post(self, path: str, payload: dict) -> Any:
+        path = self._jira_path(path, mutate=True)
         r = self.session.post(
             f"{self.jira_base}{path}", json=payload, timeout=60
         )
@@ -829,6 +854,7 @@ class AtlassianClient:
         return r.json() if r.text else {}
 
     def jira_put(self, path: str, payload: dict) -> None:
+        path = self._jira_path(path, mutate=True)
         r = self.session.put(
             f"{self.jira_base}{path}", json=payload, timeout=60
         )
@@ -836,6 +862,7 @@ class AtlassianClient:
             raise RuntimeError(f"Jira PUT {path} failed: {r.status_code} {r.text}")
 
     def jira_delete(self, path: str) -> None:
+        path = self._jira_path(path, mutate=True)
         r = self.session.delete(f"{self.jira_base}{path}", timeout=60)
         if not r.ok:
             raise RuntimeError(f"Jira DELETE {path} failed: {r.status_code} {r.text}")
@@ -1112,12 +1139,17 @@ def update_confluence_page(
 ) -> bool:
     page = fetch_confluence_page(client, page_id)
     version = page["version"]["number"]
+    # minorEdit=True：比照 D:\MEGA\Jira 其他 Confluence 腳本，降低追蹤者通知
     payload = {
         "id": page_id,
         "status": "current",
         "title": title,
         "body": {"representation": "storage", "value": table_html},
-        "version": {"number": version + 1, "message": version_message},
+        "version": {
+            "number": version + 1,
+            "message": version_message,
+            "minorEdit": True,
+        },
     }
     if dry_run:
         print(
@@ -1794,7 +1826,10 @@ def run_sync(config_path: Path, dry_run: bool) -> SyncReport:
         cfg["atlassian"]["cloud_id"],
         cfg["atlassian"]["email"],
         cfg["_api_token"],
+        silent_mode=bool(cfg.get("silent_mode", True)),
     )
+    if client.silent_mode:
+        print("寂靜寫入：Jira notifyUsers=false、Confluence minorEdit=true")
 
     page_id = str(cfg["confluence"]["page_id"])
     page = fetch_confluence_page(client, page_id)

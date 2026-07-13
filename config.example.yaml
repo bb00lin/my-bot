@@ -6,6 +6,9 @@ atlassian:
   email: "your.email@company.com"
   # api_token 請設在 .env：ATLASSIAN_API_TOKEN=...
 
+# 寂靜寫入：Jira ?notifyUsers=false；Confluence version.minorEdit=true
+silent_mode: true
+
 sharepoint:
   # Sync 腳本下載 Excel 用（必須是 download.aspx）
   download_url: "https://qsitw-my.sharepoint.com/:x:/r/personal/challo_chen_qsitw_com/_layouts/15/download.aspx?share=IQAyqQjNe2bmSp28QrFpnf_sAbL5gqBzp6h3RSCwPKx2cbY"

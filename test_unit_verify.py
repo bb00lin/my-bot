@@ -81,6 +81,32 @@ def main() -> int:
         "4. 使用 remotelink Web 連結 API",
         "/remotelink" in src and "ensure_confluence_web_link" in src,
     )
+    silent_client = sr.AtlassianClient(
+        "https://example.atlassian.net",
+        "cloud",
+        "a@b.c",
+        "token",
+        silent_mode=True,
+    )
+    loud_client = sr.AtlassianClient(
+        "https://example.atlassian.net",
+        "cloud",
+        "a@b.c",
+        "token",
+        silent_mode=False,
+    )
+    check(
+        "寂靜寫入：Jira 路徑加 notifyUsers=false",
+        silent_client._jira_path("/issue/PMWC-1", mutate=True)
+        == "/issue/PMWC-1?notifyUsers=false"
+        and silent_client._jira_path("/issue/X?deleteSubtasks=false", mutate=True)
+        == "/issue/X?deleteSubtasks=false&notifyUsers=false"
+        and loud_client._jira_path("/issue/PMWC-1", mutate=True) == "/issue/PMWC-1",
+    )
+    check(
+        "寂靜寫入：Confluence 使用 minorEdit",
+        "minorEdit" in src and "notifyUsers=false" in src,
+    )
     check(
         "JQL 任務類型別名",
         sr.jql_issuetype_name_candidates("任務") == ["任務", "Task"]
