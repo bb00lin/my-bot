@@ -42,21 +42,19 @@ Jira PMWC（P1/P2/P3… 大型工作底下的任務）
 
 ### Timeline 日期（Jira 時間軸）
 
-當 S 表 **Target close** 欄位有日期時：
+| S 表欄位 | Jira 欄位 | 規則 |
+|----------|-----------|------|
+| **Opened** | Start date（`customfield_10015` / `jira.start_date_field`） | 可解析即寫入起始日（不需 Target close） |
+| **Target close** | Due date（`duedate` / `jira.due_date_field`） | 可解析即寫入到期日；兩者皆有且 due < start 時順延至隔年 |
 
-| 欄位 | 值 |
-|------|-----|
-| 起始日（Start date） | 同步執行當天 |
-| 到期日（Due date） | Target close 解析後的日期 |
+補充：
 
-支援日期格式：`2026-07-30`、`7/30`、`7/30/2026`、Excel 序號等。
+- 僅有 Opened：只更新 Start，**不清除**既有 Due
+- 僅有 Target close：只更新 Due，**不以同步日填 Start**
+- 兩者皆有：同時寫入 Start + Due（due < start → due 年 +1）
+- 兩者皆空：不更新任何日期欄位
 
-Target close 為空時，**不更新** Jira 日期欄位。
-
-使用的 Jira 欄位（PMWC team-managed）：
-
-- `customfield_10015` — Start date（起始日）
-- `duedate` — Due date（到期日）
+支援日期格式：`2026-07-30`、`7/30`、`7/30/2026`、`7/30/26`、`7月31日`、`2026年7月31日`、Excel 序號等。
 
 可在 `config.yaml` 的 `jira.start_date_field` / `jira.due_date_field` 調整。
 
@@ -154,6 +152,9 @@ python sync_register.py --config .\config.yaml
 - **首次執行**：無前次快照，僅列出目前 S 表格所有 ID，不視為「新增」。
 - **dry-run**：仍會產生變更紀錄，但**不更新**快照。
 - **正式同步成功後**：更新 `last_snapshot.json` 供下次比對。
+- **差異郵件主旨**：括號內使用 S 表 Excel **真實檔名**（去 `.xlsx`），例如  
+  `[C27_VOX-QSI_Open_Issues_Register_20260702] 有差異 — 2026-07-14 11:00`  
+  （優先 Content-Disposition；抓不到時退回 `sharepoint.register_filename` / 來源標題）。
 
 ## 檔案說明
 
@@ -259,7 +260,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_windows_schedule.ps1
 - **缺少 ATLASSIAN_API_TOKEN**：在 `.env` 設定
 - **SharePoint 下載失敗**：確認分享連結仍有效、可公開下載
 - **Jira 狀態轉換失敗**：檢查目標狀態名稱是否與 PMWC 專案一致
-- **Timeline 沒顯示**：確認 Target close 有值，且 Jira Timeline 檢視已啟用
+- **Timeline 沒顯示**：確認 Opened 或 Target close 有值，且 Jira Timeline 檢視已啟用
 - **LINK 欄位空白**：確認已執行正式同步（非 `--dry-run`）；Closed 項目也會建立 Jira 並設為「完成」
 - **C 表格有空白列**：舊版手動表格可能含 spacer row；新版以 HTML 整頁覆寫，只輸出 S 表格筆數
 - **GitHub Actions 失敗：缺少 CONFIG_YAML**：在 Secrets 貼上完整 config.yaml（UTF-8），或提交不含 Token 的 config.yaml
