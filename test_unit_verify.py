@@ -353,45 +353,28 @@ def main() -> int:
         and "<table" in page_html,
     )
 
-    sync_url = "https://github.com/OWNER/REPO/actions/workflows/sync-register.yml"
-    sync_header = sr.build_confluence_source_link_html(
-        "https://example.com/register.xlsx",
-        "S 表格測試",
-        sync_action_url=sync_url,
-        sync_action_title="立即同步",
-    )
-    page_with_sync = sr.build_confluence_page_html(
-        rows[:1],
-        site,
-        source_link_url="https://example.com/register.xlsx",
-        source_link_title="S 表格測試",
-        sync_action_url=sync_url,
-        sync_action_title="立即同步",
-    )
-    sync_cfg_url, sync_cfg_title = sr.resolve_sync_action_link(
-        {
-            "confluence": {
-                "sync_action_url": sync_url,
-                "sync_action_title": "立即同步",
-            }
-        }
-    )
+    # 已移除頁首「立即同步」；即使誤傳舊參數也不應再出現紅按鈕
     check(
-        "C 表頂部含「立即同步」連結（已設定時）",
-        "立即同步" in sync_header
-        and sync_url in sync_header
-        and "background-color:#DE350B" in sync_header
-        and sync_url in page_with_sync
-        and "立即同步" in page_with_sync
-        and sync_cfg_url == sync_url
-        and sync_cfg_title == "立即同步",
+        "C 表頂部不再渲染「立即同步」連結",
+        "立即同步" not in source_html
+        and "background-color:#DE350B" not in source_html
+        and "立即同步" not in page_html
+        and "sync-register.yml" not in page_html,
     )
+    corrupted_title = "C27 Open Issues Register (S ??)????"
+    fixed_url, fixed_title = sr.resolve_sharepoint_source_link(
+        {"confluence": {"source_link_title": corrupted_title, "source_link_url": "https://ex"}, "sharepoint": {}}
+    )
+    fixed_html = sr.build_confluence_source_link_html("https://ex", corrupted_title)
     check(
-        "未設定 sync_action_url 時不產生同步連結",
-        "立即同步" not in sr.build_confluence_source_link_html(
-            "https://example.com/register.xlsx", "S 表格測試"
-        )
-        and sr.resolve_sync_action_link({"confluence": {}}) == ("", "立即同步"),
+        "source_link_title 含 ?? 時改用 UTF-8 預設中文標題",
+        fixed_url == "https://ex"
+        and fixed_title == sr.DEFAULT_SOURCE_LINK_TITLE
+        and "??" not in fixed_title
+        and "表格" in fixed_title
+        and "??" not in fixed_html
+        and "S 表格" in fixed_html
+        and sr.DEFAULT_SOURCE_LINK_TITLE in fixed_html,
     )
 
     check(

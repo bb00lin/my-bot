@@ -50,12 +50,13 @@ jobs:
           CONFIG_YAML: ${{ secrets.CONFIG_YAML }}
         run: |
           if [ -n "$CONFIG_YAML" ]; then
-            printf '%s\n' "$CONFIG_YAML" > config.yaml
-            echo "Wrote config.yaml from CONFIG_YAML secret."
+            # 明確以 UTF-8 寫入，避免中文標題（S 表格等）變成 ?
+            python -c "import os, pathlib; pathlib.Path('config.yaml').write_text(os.environ['CONFIG_YAML'], encoding='utf-8', newline='\n')"
+            echo "Wrote config.yaml from CONFIG_YAML secret (UTF-8)."
           elif [ -f config.yaml ]; then
             echo "Using committed config.yaml."
           else
-            echo "::error::缺少 config.yaml。請設定 GitHub Secret CONFIG_YAML（完整 YAML 內容），或將不含密鑰的 config.yaml 提交至儲存庫。"
+            echo "::error::缺少 config.yaml。請設定 GitHub Secret CONFIG_YAML（完整 YAML 內容，UTF-8），或將不含密鑰的 config.yaml 提交至儲存庫。"
             exit 1
           fi
 

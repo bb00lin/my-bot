@@ -33,10 +33,9 @@ confluence:
   page_id: "189300768"
   page_title: "mail_checking"
   version_message: "Synced from SharePoint register"
-  # 頁首「立即同步」：指向 GitHub Actions 手動執行頁（勿把 PAT / webhook secret 寫進 URL）
-  # 格式：https://github.com/<OWNER>/<REPO>/actions/workflows/sync-register.yml
-  sync_action_url: "https://github.com/bb00lin/my-bot/actions/workflows/sync-register.yml"
-  sync_action_title: "立即同步"
+  # 頁首 S 表連結顯示名稱（須 UTF-8；設定 CONFIG_YAML secret 時勿用會破壞中文的編碼）
+  source_link_title: "C27 Open Issues Register (S 表格)"
+  # source_link_url 可覆寫；未設時依序用 sharepoint.view_url → download_url
 
 jira:
   project_key: "PMWC"

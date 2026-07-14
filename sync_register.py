@@ -1334,6 +1334,18 @@ def build_confluence_html_table(
     return "".join(parts)
 
 
+# CONFIG_YAML 若在 Windows 以錯誤編碼寫入 secret，中文會變成 ?；以腳本內 UTF-8 預設救回。
+DEFAULT_SOURCE_LINK_TITLE = "C27 Open Issues Register (S 表格)"
+
+
+def _title_looks_corrupted(text: str) -> bool:
+    """偵測編碼損壞（中文變 ? 或 U+FFFD）。合法標題不應含 ASCII ?。"""
+    t = (text or "").strip()
+    if not t:
+        return True
+    return "?" in t or "\ufffd" in t
+
+
 def resolve_sharepoint_source_link(cfg: dict[str, Any]) -> tuple[str, str]:
     """回傳 Confluence 頁首 S 表連結 (url, title)。"""
     conf = cfg.get("confluence", {})
@@ -1344,51 +1356,21 @@ def resolve_sharepoint_source_link(cfg: dict[str, Any]) -> tuple[str, str]:
         or sp.get("download_url")
         or ""
     ).strip()
-    title = (conf.get("source_link_title") or "Open Issues Register (SharePoint)").strip()
+    title = (conf.get("source_link_title") or "").strip()
+    if _title_looks_corrupted(title):
+        title = DEFAULT_SOURCE_LINK_TITLE
     return url, title
 
 
-def resolve_sync_action_link(cfg: dict[str, Any]) -> tuple[str, str]:
-    """回傳 Confluence 頁首「立即同步」連結 (url, title)。
-
-    建議指向 GitHub Actions workflow 頁面（手動 Run workflow），
-    勿把 webhook / PAT 密鑰寫進 Confluence URL。
-    """
-    conf = cfg.get("confluence", {})
-    url = (conf.get("sync_action_url") or "").strip()
-    title = (conf.get("sync_action_title") or "立即同步").strip()
-    return url, title
-
-
-def build_confluence_source_link_html(
-    url: str,
-    title: str,
-    *,
-    sync_action_url: str = "",
-    sync_action_title: str = "立即同步",
-) -> str:
-    """Confluence 頁首：S 表來源連結 + 可選「立即同步」按鈕樣式連結。"""
-    if not url and not sync_action_url:
+def build_confluence_source_link_html(url: str, title: str) -> str:
+    """Confluence 頁首：僅 S 表來源連結（不再渲染「立即同步」按鈕）。"""
+    if not url:
         return ""
-    parts: list[str] = ["<p>"]
-    if url:
-        parts.append(
-            f"<strong>S 表格：</strong>"
-            f'<a href="{escape_html(url)}">{escape_html(title)}</a>'
-        )
-    if sync_action_url:
-        label = (sync_action_title or "立即同步").strip() or "立即同步"
-        # 紅色按鈕外觀，置於 S 表格連結旁（對應頁首紅框區域）
-        margin = "margin-left:12px;" if url else ""
-        parts.append(
-            f'<a href="{escape_html(sync_action_url)}" '
-            f'style="display:inline-block;{margin}padding:4px 12px;'
-            f"background-color:#DE350B;color:#FFFFFF;text-decoration:none;"
-            f'border-radius:3px;font-weight:bold;">'
-            f"{escape_html(label)}</a>"
-        )
-    parts.append("</p>")
-    return "".join(parts)
+    safe_title = title.strip() if not _title_looks_corrupted(title) else DEFAULT_SOURCE_LINK_TITLE
+    return (
+        f"<p><strong>S 表格：</strong>"
+        f'<a href="{escape_html(url)}">{escape_html(safe_title)}</a></p>'
+    )
 
 
 def build_confluence_page_html(
@@ -1398,16 +1380,9 @@ def build_confluence_page_html(
     *,
     source_link_url: str = "",
     source_link_title: str = "",
-    sync_action_url: str = "",
-    sync_action_title: str = "立即同步",
 ) -> str:
-    """Confluence 頁面正文：S 表連結、立即同步按鈕 + 資料表格。"""
-    prefix = build_confluence_source_link_html(
-        source_link_url,
-        source_link_title,
-        sync_action_url=sync_action_url,
-        sync_action_title=sync_action_title,
-    )
+    """Confluence 頁面正文：S 表連結 + 資料表格。"""
+    prefix = build_confluence_source_link_html(source_link_url, source_link_title)
     table = build_confluence_html_table(rows, site_url, s_columns)
     return prefix + table
 
@@ -2176,11 +2151,8 @@ def run_sync(config_path: Path, dry_run: bool) -> SyncReport:
 
     site_url = cfg["atlassian"]["site_url"]
     source_link_url, source_link_title = resolve_sharepoint_source_link(cfg)
-    sync_action_url, sync_action_title = resolve_sync_action_link(cfg)
     if source_link_url:
         print(f"S 表連結: {source_link_title} ({source_link_url[:60]}...)")
-    if sync_action_url:
-        print(f"立即同步連結: {sync_action_title} ({sync_action_url})")
     for row in s_rows:
         key = row.jira_key or id_to_key.get(row.register_id, "")
         if not is_valid_jira_key(key):
@@ -2225,14 +2197,10 @@ def run_sync(config_path: Path, dry_run: bool) -> SyncReport:
         s_columns,
         source_link_url=source_link_url,
         source_link_title=source_link_title,
-        sync_action_url=sync_action_url,
-        sync_action_title=sync_action_title,
     )
     print(f"C 表格將寫入 {len(s_rows)} 列 × {len(c_columns_for(s_columns))} 欄（無空白列）")
     if source_link_url:
         print("C 表頂部已加入 S 表格連結")
-    if sync_action_url:
-        print("C 表頂部已加入「立即同步」連結")
     report.confluence_updated = update_confluence_page(
         client,
         page_id,
