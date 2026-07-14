@@ -223,6 +223,8 @@ class RegisterDiff:
     field_changes: list[FieldChange] = field(default_factory=list)
     is_first_run: bool = False
     snapshot_saved_at: str = ""
+    # register_id -> 顯示用標題（新增／移除列用）
+    id_titles: dict[str, str] = field(default_factory=dict)
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -423,15 +425,31 @@ def jira_status_source(row: RegisterRow) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _normalize_snapshot_text(value: str) -> str:
+    """統一換行，避免 \\r\\n / \\n 造成假差異。"""
+    return (value or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def register_row_to_snapshot_dict(row: RegisterRow) -> dict[str, str]:
-    return {attr: str(getattr(row, attr) or "") for attr, _ in SNAPSHOT_FIELDS}
+    return {
+        attr: _normalize_snapshot_text(str(getattr(row, attr) or ""))
+        for attr, _ in SNAPSHOT_FIELDS
+    }
 
 
 def load_last_snapshot(path: Path) -> tuple[dict[str, dict[str, str]], str]:
     if not path.exists():
         return {}, ""
     data = json.loads(path.read_text(encoding="utf-8"))
-    rows = data.get("rows", {})
+    rows_raw = data.get("rows", {})
+    rows: dict[str, dict[str, str]] = {}
+    for rid, row in rows_raw.items():
+        if not isinstance(row, dict):
+            continue
+        rows[str(rid)] = {
+            str(k): _normalize_snapshot_text(str(v if v is not None else ""))
+            for k, v in row.items()
+        }
     saved_at = str(data.get("saved_at", ""))
     return rows, saved_at
 
@@ -448,6 +466,12 @@ def save_last_snapshot(path: Path, rows: list[RegisterRow]) -> None:
     )
 
 
+def _snapshot_title(row: dict[str, str] | None) -> str:
+    if not row:
+        return ""
+    return (row.get("title") or "").strip()
+
+
 def compute_register_diff(
     old_rows: dict[str, dict[str, str]],
     new_rows: list[RegisterRow],
@@ -460,6 +484,17 @@ def compute_register_diff(
 
     old_ids = set(old_rows.keys())
     new_ids = {r.register_id for r in new_rows}
+    new_map = {r.register_id: register_row_to_snapshot_dict(r) for r in new_rows}
+
+    # 標題對照（新增／移除顯示用）
+    for rid, row in old_rows.items():
+        title = _snapshot_title(row)
+        if title:
+            diff.id_titles[rid] = title
+    for rid, row in new_map.items():
+        title = _snapshot_title(row)
+        if title:
+            diff.id_titles[rid] = title
 
     if diff.is_first_run:
         diff.added_ids = sorted(new_ids)
@@ -468,13 +503,12 @@ def compute_register_diff(
     diff.added_ids = sorted(new_ids - old_ids)
     diff.removed_ids = sorted(old_ids - new_ids)
 
-    new_map = {r.register_id: register_row_to_snapshot_dict(r) for r in new_rows}
     for rid in sorted(new_ids & old_ids):
         old_row = old_rows[rid]
         new_row = new_map[rid]
         for attr, label in SNAPSHOT_FIELDS:
-            old_val = old_row.get(attr, "")
-            new_val = new_row.get(attr, "")
+            old_val = _normalize_snapshot_text(old_row.get(attr, ""))
+            new_val = _normalize_snapshot_text(new_row.get(attr, ""))
             if old_val == new_val:
                 continue
             change = FieldChange(rid, label, old_val, new_val)
@@ -493,8 +527,50 @@ def _truncate_diff_value(text: str, max_len: int = 80) -> str:
     return value[: max_len - 3] + "..."
 
 
+def _format_diff_value_pair(
+    old: str, new: str, *, max_len: int = 80
+) -> tuple[str, str]:
+    """截斷顯示；若前綴相同則把視窗移到第一個差異處，避免郵件看起來「沒變」。"""
+    old_s = (old or "").replace("\n", " ")
+    new_s = (new or "").replace("\n", " ")
+    if len(old_s) <= max_len and len(new_s) <= max_len:
+        return old_s, new_s
+
+    # 找第一個差異索引
+    limit = min(len(old_s), len(new_s))
+    idx = 0
+    while idx < limit and old_s[idx] == new_s[idx]:
+        idx += 1
+    if idx == limit and len(old_s) == len(new_s):
+        # 理論上不應進 diff；仍安全截斷
+        return _truncate_diff_value(old_s, max_len), _truncate_diff_value(new_s, max_len)
+
+    # 在差異點前後留 context
+    context = max(12, max_len // 4)
+    start = max(0, idx - context)
+
+    def _window(s: str) -> str:
+        chunk = s[start:]
+        prefix = "..." if start > 0 else ""
+        body_budget = max_len - len(prefix) - 3
+        if len(chunk) <= body_budget + 3:
+            return prefix + chunk
+        return prefix + chunk[:body_budget] + "..."
+
+    return _window(old_s), _window(new_s)
+
+
+def _format_id_with_title(rid: str, titles: dict[str, str]) -> str:
+    title = (titles.get(rid) or "").strip()
+    if not title:
+        return rid
+    short = _truncate_diff_value(title, 60)
+    return f"{rid} — {short}"
+
+
 def format_diff_report(diff: RegisterDiff, *, dry_run: bool = False) -> str:
     lines: list[str] = ["========== S 表格變更摘要 =========="]
+    titles = diff.id_titles or {}
 
     if diff.is_first_run:
         lines.append("比對基準: 首次執行（無前次快照）")
@@ -510,7 +586,7 @@ def format_diff_report(diff: RegisterDiff, *, dry_run: bool = False) -> str:
     if diff.is_first_run:
         lines.append(f"【首次快照】目前 S 表格共 {len(diff.added_ids)} 筆有效 ID")
         for rid in diff.added_ids:
-            lines.append(f"  • {rid}")
+            lines.append(f"  • {_format_id_with_title(rid, titles)}")
         lines.append("")
         lines.append("【結論】首次執行，僅建立基準快照（尚無前後差異可比）。")
         return "\n".join(lines)
@@ -518,7 +594,7 @@ def format_diff_report(diff: RegisterDiff, *, dry_run: bool = False) -> str:
     lines.append(f"【新增】{len(diff.added_ids)} 筆")
     if diff.added_ids:
         for rid in diff.added_ids:
-            lines.append(f"  + {rid}")
+            lines.append(f"  + {_format_id_with_title(rid, titles)}")
     else:
         lines.append("  （無）")
 
@@ -526,7 +602,7 @@ def format_diff_report(diff: RegisterDiff, *, dry_run: bool = False) -> str:
     lines.append(f"【移除】{len(diff.removed_ids)} 筆")
     if diff.removed_ids:
         for rid in diff.removed_ids:
-            lines.append(f"  - {rid}")
+            lines.append(f"  - {_format_id_with_title(rid, titles)}")
     else:
         lines.append("  （無）")
 
@@ -536,7 +612,8 @@ def format_diff_report(diff: RegisterDiff, *, dry_run: bool = False) -> str:
         for change in diff.status_changes:
             old = change.old_value or "（空）"
             new = change.new_value or "（空）"
-            lines.append(f"  {change.register_id}: {old} → {new}")
+            label = _format_id_with_title(change.register_id, titles)
+            lines.append(f"  {label}: {old} → {new}")
     else:
         lines.append("  （無）")
 
@@ -544,11 +621,12 @@ def format_diff_report(diff: RegisterDiff, *, dry_run: bool = False) -> str:
     lines.append(f"【欄位變更】{len(diff.field_changes)} 筆")
     if diff.field_changes:
         for change in diff.field_changes:
-            old = _truncate_diff_value(change.old_value) or "（空）"
-            new = _truncate_diff_value(change.new_value) or "（空）"
+            old, new = _format_diff_value_pair(change.old_value, change.new_value)
+            old_disp = old or "（空）"
+            new_disp = new or "（空）"
             lines.append(
                 f"  {change.register_id} / {change.field_label}: "
-                f"{old!r} → {new!r}"
+                f"{old_disp!r} → {new_disp!r}"
             )
     else:
         lines.append("  （無）")
@@ -1148,21 +1226,47 @@ def build_diff_email_subject(
     return f"[{subject_token}] {verdict} — {when}"
 
 
+def resolve_local_xlsx_override() -> Path | None:
+    """環境變數 SYNC_LOCAL_XLSX：改讀本機 Excel（跳過 SharePoint 下載）。"""
+    raw = (os.environ.get("SYNC_LOCAL_XLSX") or "").strip().strip('"')
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_file():
+        raise RuntimeError(f"SYNC_LOCAL_XLSX 不是有效檔案: {path}")
+    return path.resolve()
+
+
 def download_sharepoint_excel(url: str, cache_dir: Path) -> tuple[Path, str]:
     """下載至 register_latest.xlsx；回傳 (path, 原始檔名 basename)。
 
     原始檔名優先取自 Content-Disposition（filename / filename*），否則 URL。
     同時寫入 cache_dir/register_original_name.txt（若有解析到）。
+
+    若設 SYNC_LOCAL_XLSX，改用本機檔並複製到 cache（便於驗證郵件／差異）。
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
     dest = cache_dir / _REGISTER_CACHE_NAME
+    name_file = cache_dir / _REGISTER_ORIGINAL_NAME_FILE
+
+    local = resolve_local_xlsx_override()
+    if local is not None:
+        data = local.read_bytes()
+        if len(data) < 1000:
+            raise RuntimeError(f"SYNC_LOCAL_XLSX 檔案過小: {local}")
+        dest.write_bytes(data)
+        original = local.name
+        name_file.write_text(original, encoding="utf-8")
+        print(f"使用本機 S 表 (SYNC_LOCAL_XLSX): {local}")
+        print(f"S 表原始檔名: {original}")
+        return dest, original
+
     resp = requests.get(url, timeout=120, allow_redirects=True)
     resp.raise_for_status()
     if len(resp.content) < 1000:
         raise RuntimeError("下載的檔案過小，可能不是有效的 xlsx。")
     dest.write_bytes(resp.content)
     original = extract_download_original_filename(resp, url)
-    name_file = cache_dir / _REGISTER_ORIGINAL_NAME_FILE
     if original:
         name_file.write_text(original, encoding="utf-8")
         print(f"S 表原始檔名: {original}")

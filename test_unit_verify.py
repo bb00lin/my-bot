@@ -941,6 +941,62 @@ def main() -> int:
         status_report_text,
     )
 
+    # 新增列應帶 Title；長字串差異不可截成看起來「沒變」
+    added_with_title = sr.RegisterDiff(
+        added_ids=["TST-99"],
+        id_titles={"TST-99": "Cursor mail diff test"},
+        snapshot_saved_at="2026-07-10T10:00:00",
+    )
+    added_text = sr.format_diff_report(added_with_title)
+    check(
+        "Diff report 新增含 Title",
+        "+ TST-99 — Cursor mail diff test" in added_text
+        and "【結論】有差異" in added_text
+        and "【欄位變更】0 筆" in added_text,
+        added_text,
+    )
+    long_prefix = "X" * 90
+    old_long = long_prefix + "BEFORE_TAIL"
+    new_long = long_prefix + "AFTER_TAIL"
+    old_fmt, new_fmt = sr._format_diff_value_pair(old_long, new_long)
+    check(
+        "Diff 長字串顯示移到差異點",
+        old_fmt != new_fmt and "BEFORE_TAIL" in old_fmt and "AFTER_TAIL" in new_fmt,
+        f"old={old_fmt!r} new={new_fmt!r}",
+    )
+    crlf_old = {
+        "RF-01": {
+            "jira": "",
+            "workstream": "",
+            "title": "T",
+            "description": "line1\r\nline2",
+            "next_action": "",
+            "ball_with": "",
+            "priority": "P1",
+            "status": "Open",
+            "opened": "",
+            "target_close": "",
+            "next_milestone": "",
+            "source": "",
+            "qsi_comment": "",
+        }
+    }
+    crlf_new = [
+        sr.RegisterRow(
+            register_id="RF-01",
+            title="T",
+            description="line1\nline2",
+            priority="P1",
+            status="Open",
+        )
+    ]
+    crlf_diff = sr.compute_register_diff(crlf_old, crlf_new, snapshot_saved_at="t")
+    check(
+        "Diff 正規化 CRLF 不報假差異",
+        not crlf_diff.field_changes and not crlf_diff.status_changes,
+        f"fields={crlf_diff.field_changes}",
+    )
+
     email_body = sr.build_diff_email_body(
         empty_report_text,
         sr.SyncReport(),
