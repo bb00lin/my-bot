@@ -26,6 +26,7 @@ Jira PMWC（P1/P2/P3… 大型工作底下的任務）
 | Jira 父子關係 | 任務透過 `parent` 欄位掛在 Priority Epic 下（僅 Jira 麵包屑，**不**建立 issue link） |
 | S 已刪除的 ID | 對應 Jira 任務一併**刪除** |
 | Jira 任務名稱 | `ID_Title`（例：`RF-05_BT Rx max-input-level sweep to +10 dBm`） |
+| S 表 ID 重複 | 該 ID 的**所有**列：Jira 標題最前方加 `ID重複 `（例：`ID重複 RF-14_Some title`）；唯一後下次同步會拿掉 |
 | Closed 狀態 | 建立 Jira 並設為「完成」，LINK 欄仍回寫 PMWC 連結 |
 
 ### Status 對應（子字串優先順序）
@@ -42,17 +43,19 @@ Jira PMWC（P1/P2/P3… 大型工作底下的任務）
 
 ### Timeline 日期（Jira 時間軸）
 
-| S 表欄位 | Jira 欄位 | 規則 |
-|----------|-----------|------|
-| **Opened** | Start date（`customfield_10015` / `jira.start_date_field`） | 可解析即寫入起始日（不需 Target close） |
-| **Target close** | Due date（`duedate` / `jira.due_date_field`） | 可解析即寫入到期日；兩者皆有且 due < start 時順延至隔年 |
+| S 表儲存格 | Jira 欄位 | 行為 |
+|------------|-----------|------|
+| **空白／空字串** | Start（Opened）或 Due（Target close） | **不變更** Jira 既有值（payload 省略該欄） |
+| **有內容但無法解析為日期** | 同上 | **忽略**，不變更 Jira |
+| **成功解析為日期** | Opened → Start、Target close → Due | 寫入解析後的 `YYYY-MM-DD` |
+| **兩者皆成功解析且 due < start** | Due | 將 due **年 +1**（僅兩邊都自本 run 表格解析時） |
 
 補充：
 
-- 僅有 Opened：只更新 Start，**不清除**既有 Due
-- 僅有 Target close：只更新 Due，**不以同步日填 Start**
-- 兩者皆有：同時寫入 Start + Due（due < start → due 年 +1）
-- 兩者皆空：不更新任何日期欄位
+- 絕不使用 `sync_date` 回填 Start，也不以 `null`/`None` 清空日期欄
+- 僅有 Opened 可解析：只更新 Start，**不碰** Due
+- 僅有 Target close 可解析：只更新 Due，**不碰** Start
+- create／update 皆只 `update` 有成功解析的欄位
 
 支援日期格式：`2026-07-30`、`7/30`、`7/30/2026`、`7/30/26`、`7月31日`、`2026年7月31日`、Excel 序號等。
 
@@ -172,14 +175,13 @@ python sync_register.py --config .\config.yaml
 
 **建議用 GitHub Actions 做每日自動同步**（雲端執行，不必本機開機）。手動同步請到 Actions 頁面按 **Run workflow**。
 
-### 自動排程（每日 09:00／17:00 台灣時間）
+### 自動排程（每日 00:00 台灣時間）
 
 `.github/workflows/sync-register.yml` 已設定為**主要排程**：
 
 | 台灣時間 | cron（UTC） |
 |----------|-------------|
-| 09:00 | `0 1 * * *` |
-| 17:00 | `0 9 * * *` |
+| 00:00（晚上 12:00） | `0 16 * * *` |
 
 推送到 GitHub 並設好 Secrets 後即可無人值守執行。亦可手動 **Run workflow**。實際觸發可能有數分鐘延遲。
 
@@ -225,6 +227,16 @@ git push -u origin main
 |--------|------|
 | `ATLASSIAN_API_TOKEN` | Atlassian API Token（**必要**） |
 | `CONFIG_YAML` | 完整 `config.yaml` 文字內容（**建議**；必須以 **UTF-8** 寫入，否則中文會變 `?`） |
+| `SYNC_NOTIFY_EMAIL` | 可選；覆寫 **To**（僅主收件人，例如 `bob.lin@qsitw.com`） |
+| `SYNC_NOTIFY_CC` | 可選；覆寫 **Cc**（亦可只寫在 `CONFIG_YAML` 的 `notify.email_cc`） |
+
+`notify` 收件人範例（To／Cc 分離）：
+
+```yaml
+notify:
+  email_to: bob.lin@qsitw.com
+  email_cc: shannon.chang@qsitw.com  # 或 list
+```
 
 設定 `CONFIG_YAML` 時（PowerShell，避免編碼破壞中文）：
 
@@ -246,7 +258,7 @@ confluence:
 
 1. 開啟：`https://github.com/<OWNER>/<REPO>/actions/workflows/sync-register.yml`
 2. 先按 **Run workflow** 驗證
-3. 之後依 cron 於台灣時間 09:00、17:00 自動跑
+3. 之後依 cron 於台灣時間每天 00:00 自動跑
 
 ### Windows 本機排程（可選備援，需開機）
 
