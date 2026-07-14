@@ -148,68 +148,6 @@ def main() -> int:
 
     # 3. Status mapping — S/C 表預期為英文 Status
     cases = [
-        ("Blocked by vendor", "BLOCKED"),
-        ("Closed", "完成"),
-        ("In progress - testing", "進行中"),
-        ("Open", "待辦事項"),
-        ("", "待辦事項"),
-        ("blocked then closed", "BLOCKED"),
-    ]
-    status_ok = True
-    for raw, expected in cases:
-        got = sr.map_status_to_jira(raw)
-        if got != expected:
-            status_ok = False
-            print(f"       {raw!r} -> {got} (期望 {expected})")
-    check("6. Status 子字串 fallback", status_ok)
-
-    exact_cases = [
-        ("BLOCKED", "BLOCKED"),
-        ("blocked", "BLOCKED"),
-        ("CANDIDATE", "CANDIDATE"),
-        ("RESUME", "RESUME"),
-        ("WAITING", "WAITING"),
-        ("ABORT", "ABORT"),
-    ]
-    exact_ok = all(sr.map_status_to_jira(raw) == exp for raw, exp in exact_cases)
-    check("6. Status 英文狀態名完全符合", exact_ok)
-
-    synonym_cases = [
-        ("Done", "完成"),
-        ("Completed", "完成"),
-        ("Complete", "完成"),
-        ("In progress", "進行中"),
-        ("In-progress", "進行中"),
-        ("Doing", "進行中"),
-        ("Working", "進行中"),
-        ("Todo", "待辦事項"),
-        ("To do", "待辦事項"),
-        ("To-do", "待辦事項"),
-        ("Backlog", "待辦事項"),
-        ("New", "待辦事項"),
-        ("Block", "BLOCKED"),
-        ("Wait", "WAITING"),
-        ("Candidate", "CANDIDATE"),
-        ("Resume", "RESUME"),
-        ("Aborted", "ABORT"),
-        ("Cancelled", "ABORT"),
-        ("Canceled", "ABORT"),
-        ("进行中", "進行中"),
-    ]
-    synonym_ok = all(sr.map_status_to_jira(raw) == exp for raw, exp in synonym_cases)
-    if not synonym_ok:
-        for raw, exp in synonym_cases:
-            got = sr.map_status_to_jira(raw)
-            if got != exp:
-                print(f"       {raw!r} -> {got} (期望 {exp})")
-    check("6. Status 英文同義詞→Jira", synonym_ok)
-
-    case_variants = [
-        ("Todo", "待辦事項"),
-        ("TODO", "待辦事項"),
-        ("todo", "待辦事項"),
-        ("ToDo", "待辦事項"),
-        ("TO DO", "待辦事項"),
         ("Done", "完成"),
         ("DONE", "完成"),
         ("done", "完成"),
@@ -218,33 +156,69 @@ def main() -> int:
         ("closed", "完成"),
         ("Completed", "完成"),
         ("COMPLETED", "完成"),
-        ("Blocked", "BLOCKED"),
-        ("BLOCKED", "BLOCKED"),
-        ("blocked", "BLOCKED"),
-        ("BlOcKeD", "BLOCKED"),
-        ("Waiting", "WAITING"),
-        ("WAITING", "WAITING"),
-        ("waiting", "WAITING"),
-        ("wAiTiNg", "WAITING"),
-        ("In Progress", "進行中"),
-        ("in progress", "進行中"),
-        ("IN PROGRESS", "進行中"),
-        ("IN-PROGRESS", "進行中"),
-        ("Candidate", "CANDIDATE"),
-        ("CANDIDATE", "CANDIDATE"),
-        ("Resume", "RESUME"),
-        ("RESUME", "RESUME"),
-        ("Abort", "ABORT"),
-        ("ABORT", "ABORT"),
-        ("CANCELLED", "ABORT"),
+        ("Closed - superseded", "完成"),
+        ("Task done by vendor", "完成"),
+        ("In progress", None),
+        ("Open", None),
+        ("Blocked", None),
+        ("BLOCKED", None),
+        ("Todo", None),
+        ("Waiting", None),
+        ("", None),
+        ("Complete", None),  # 不含 Completed／Done／Closed
     ]
-    case_ok = all(sr.map_status_to_jira(raw) == exp for raw, exp in case_variants)
-    if not case_ok:
-        for raw, exp in case_variants:
+    status_ok = True
+    for raw, expected in cases:
+        got = sr.map_status_to_jira(raw)
+        if got != expected:
+            status_ok = False
+            print(f"       {raw!r} -> {got} (期望 {expected})")
+    check("6. Status 僅 Done/Closed/Completed→完成，其餘不變更", status_ok)
+
+    contain_cases = [
+        ("closed - superseded", "完成"),
+        ("CLOSED - SuperSeded", "完成"),
+        ("work Completed yesterday", "完成"),
+        ("Marked as Done", "完成"),
+        ("In Progress", None),
+        ("Open", None),
+        ("Blocked by vendor", None),
+        ("blocked then closed", "完成"),  # 含 closed → 完成
+    ]
+    contain_ok = all(sr.map_status_to_jira(raw) == exp for raw, exp in contain_cases)
+    if not contain_ok:
+        for raw, exp in contain_cases:
             got = sr.map_status_to_jira(raw)
             if got != exp:
                 print(f"       {raw!r} -> {got} (期望 {exp})")
-    check("6. Status 英文大小寫不敏感", case_ok)
+    check("6. Status 子字串含 Closed/Done/Completed", contain_ok)
+
+    no_change_cases = [
+        "In progress",
+        "in-progress",
+        "Open",
+        "Blocked",
+        "BLOCKED",
+        "Todo",
+        "To do",
+        "Waiting",
+        "CANDIDATE",
+        "RESUME",
+        "ABORT",
+        "Cancelled",
+        "",
+        "   ",
+        "Complete",
+        "进行中",
+    ]
+    no_change_ok = all(sr.map_status_to_jira(raw) is None for raw in no_change_cases)
+    if not no_change_ok:
+        for raw in no_change_cases:
+            got = sr.map_status_to_jira(raw)
+            if got is not None:
+                print(f"       {raw!r} -> {got} (期望 None／不變更)")
+    check("6. Status 其他值→不變更 Jira（None）", no_change_ok)
+
 
 
 
@@ -505,8 +479,8 @@ def main() -> int:
         reg is not None and sr.jira_epic_priority(reg) == "P1",
     )
     check(
-        "Jira Status 讀 Status 欄",
-        reg is not None and sr.map_status_to_jira(sr.jira_status_source(reg)) == "待辦事項",
+        "Jira Status 讀 Status 欄（Open→不變更）",
+        reg is not None and sr.map_status_to_jira(sr.jira_status_source(reg)) is None,
     )
 
     check(

@@ -72,71 +72,9 @@ S_COLUMN_ATTR: dict[str, str] = {
     "QSI Comment": "qsi_comment",
 }
 
-# Jira 實際狀態名稱
-JIRA_EXACT_STATUSES: frozenset[str] = frozenset(
-    {
-        "待辦事項",
-        "BLOCKED",
-        "CANDIDATE",
-        "RESUME",
-        "進行中",
-        "WAITING",
-        "ABORT",
-        "完成",
-    }
-)
-# Jira 畫面英文狀態名（大小寫不敏感完全匹配）
-JIRA_ENGLISH_STATUSES: frozenset[str] = frozenset(
-    {"BLOCKED", "CANDIDATE", "RESUME", "WAITING", "ABORT"}
-)
-
-# 少數異體字別名（表通常用英文，但仍相容）
-JIRA_STATUS_ALIASES: dict[str, str] = {
-    "进行中": "進行中",
-}
-
-# 英文同義詞 → Jira 狀態（正規化後完全相符；鍵一律小寫、空格統一）
-ENGLISH_STATUS_SYNONYMS: dict[str, str] = {
-    # → 完成
-    "done": "完成",
-    "closed": "完成",
-    "completed": "完成",
-    "complete": "完成",
-    # → 進行中
-    "in progress": "進行中",
-    "in-progress": "進行中",
-    "inprogress": "進行中",
-    "doing": "進行中",
-    "working": "進行中",
-    # → 待辦事項
-    "open": "待辦事項",
-    "todo": "待辦事項",
-    "to do": "待辦事項",
-    "to-do": "待辦事項",
-    "backlog": "待辦事項",
-    "new": "待辦事項",
-    # → BLOCKED / WAITING / …
-    "blocked": "BLOCKED",
-    "block": "BLOCKED",
-    "waiting": "WAITING",
-    "wait": "WAITING",
-    "candidate": "CANDIDATE",
-    "resume": "RESUME",
-    "abort": "ABORT",
-    "aborted": "ABORT",
-    "cancelled": "ABORT",
-    "canceled": "ABORT",
-}
-
-# 子字串 fallback（最後手段；Blocked > Closed > In progress > Open）
-STATUS_RULES: list[tuple[str, str]] = [
-    ("blocked", "BLOCKED"),
-    ("closed", "完成"),
-    ("completed", "完成"),
-    ("in progress", "進行中"),
-    ("in-progress", "進行中"),
-    ("open", "待辦事項"),
-]
+# S 表 Status 含下列關鍵字（大小寫不敏感）→ Jira「完成」；其餘一律不改 Jira 狀態
+DONE_STATUS_KEYWORDS: tuple[str, ...] = ("done", "closed", "completed")
+JIRA_DONE_STATUS = "完成"
 DEFAULT_JIRA_STATUS = "待辦事項"
 
 # Team-managed Jira：畫面類型名與 JQL 可用名不一致（例：顯示「任務」但 JQL 需 Task；
@@ -294,63 +232,25 @@ def load_config(path: Path) -> dict[str, Any]:
     return cfg
 
 
-def _normalize_status_key(text: str) -> str:
-    """英文狀態比對用：casefold、壓縮空白、連字號／底線空白化。"""
-    value = (text or "").strip().casefold()
-    value = value.replace("_", " ").replace("-", " ")
-    value = re.sub(r"\s+", " ", value)
-    return value
+def map_status_to_jira(status: str) -> str | None:
+    """將 S 表 Status 對應到 Jira 狀態；僅 Done/Closed/Completed →「完成」。
 
-
-def map_status_to_jira(status: str) -> str:
-    """將 S/C 表 Status（預期為英文）對應到 Jira 狀態名。
-
-    優先順序（**所有英文比對一律大小寫不敏感**，使用 casefold）：
-    1. 完全符合 Jira 英文狀態名（BLOCKED / CANDIDATE / RESUME / WAITING / ABORT）
-    2. 英文同義詞 → 中文／英文 Jira 狀態（Todo/TODO/todo→待辦事項、Done/DONE→完成…）
-    3. 少數非英文別名（进行中）或已是 Jira 中文狀態名
-    4. 子字串 fallback（blocked / closed / in progress / open）
+    回傳 None 表示**不要變更** Jira 狀態（Open / In Progress / Blocked / 空值等）。
+    比對大小寫不敏感，採子字串包含（例：「Closed - superseded」→ 完成）。
     """
     text = (status or "").strip()
     if not text:
-        return DEFAULT_JIRA_STATUS
-
-    # 1) Jira 英文狀態名（大小寫不敏感）
-    english_by_fold = {name.casefold(): name for name in JIRA_ENGLISH_STATUSES}
-    folded = text.casefold()
-    if folded in english_by_fold:
-        return english_by_fold[folded]
-
-    # 2) 英文同義詞完整匹配（不含前後額外敘述）
-    key = _normalize_status_key(text)
-    synonym_by_fold = {k.casefold(): v for k, v in ENGLISH_STATUS_SYNONYMS.items()}
-    if key in synonym_by_fold:
-        return synonym_by_fold[key]
-    compact = re.sub(r"[\s\-]+", "", key)
-    compact_map = {
-        re.sub(r"[\s\-]+", "", k.casefold()): v
-        for k, v in ENGLISH_STATUS_SYNONYMS.items()
-    }
-    if compact in compact_map:
-        return compact_map[compact]
-
-    # 3) 已是 Jira 狀態名或別名（相容舊資料／偶然中文）
-    if text in JIRA_STATUS_ALIASES:
-        return JIRA_STATUS_ALIASES[text]
-    if text in JIRA_EXACT_STATUSES:
-        return text
-
-    # 4) 子字串 fallback（小寫／casefold）
+        return None
     lowered = text.casefold()
-    for needle, jira_status in STATUS_RULES:
-        if needle.casefold() in lowered:
-            return jira_status
-    return DEFAULT_JIRA_STATUS
+    for keyword in DONE_STATUS_KEYWORDS:
+        if keyword in lowered:
+            return JIRA_DONE_STATUS
+    return None
 
 
 def normalize_jira_status_name(status: str) -> str:
-    """正規化為 Jira transition 目標名稱。"""
-    return map_status_to_jira(status) if status else DEFAULT_JIRA_STATUS
+    """正規化 Jira transition 目標名稱（已是 Jira 狀態名時原樣比對）。"""
+    return (status or "").strip()
 
 
 def _excel_serial_to_datetime(value: float) -> datetime:
@@ -711,7 +611,10 @@ def send_diff_email(
     subject: str,
     body: str,
 ) -> None:
-    """透過 SMTP 寄出差異報告（GitHub Secrets: MAIL_USERNAME / MAIL_PASSWORD）。"""
+    """透過 SMTP 寄出差異報告（GitHub Secrets: MAIL_USERNAME / MAIL_PASSWORD）。
+
+    Office365：smtp.office365.com:587 + STARTTLS；From 必須等於 MAIL_USERNAME。
+    """
     notify = cfg.get("notify") or {}
     to_addr = (
         os.environ.get("SYNC_NOTIFY_EMAIL")
@@ -734,12 +637,18 @@ def send_diff_email(
         or "smtp.office365.com"
     ).strip()
     port = int(os.environ.get("SMTP_PORT") or notify.get("smtp_port") or 587)
-    from_addr = (notify.get("email_from") or user or to_addr).strip()
+    # Office365 要求 From 與登入帳號一致
+    from_addr = user
 
     if not user or not password:
         raise RuntimeError(
             "寄信失敗：缺少 MAIL_USERNAME / MAIL_PASSWORD（或 notify.smtp_*）"
         )
+
+    print(
+        f"SMTP 準備寄信: host={host}:{port} user={user} from={from_addr} "
+        f"to={to_addr} password_set=True password_len={len(password)}"
+    )
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -747,10 +656,30 @@ def send_diff_email(
     msg["To"] = to_addr
     msg.set_content(body)
 
-    with smtplib.SMTP(host, port, timeout=60) as smtp:
-        smtp.starttls()
-        smtp.login(user, password)
-        smtp.send_message(msg)
+    try:
+        with smtplib.SMTP(host, port, timeout=60) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
+            smtp.login(user, password)
+            smtp.send_message(msg)
+    except smtplib.SMTPAuthenticationError as exc:
+        err = str(exc)
+        hint = ""
+        if "5.7.139" in err or "basic authentication is disabled" in err.lower():
+            hint = (
+                " 提示：此租戶已停用 SMTP Basic Auth。"
+                "請為 MAIL_USERNAME 啟用 Authenticated SMTP，"
+                "並將 MAIL_PASSWORD 改為「應用程式密碼」（非登入密碼）；"
+                "From 已固定為 MAIL_USERNAME。"
+            )
+        raise RuntimeError(
+            f"SMTP 認證失敗 ({host}:{port}, user={user}): {exc}.{hint}"
+        ) from exc
+    except smtplib.SMTPException as exc:
+        raise RuntimeError(
+            f"SMTP 寄信失敗 ({host}:{port}, user={user}, from={from_addr}, to={to_addr}): {exc}"
+        ) from exc
 
 
 def deliver_diff_report(
@@ -1347,16 +1276,19 @@ def row_has_timeline(row: RegisterRow) -> bool:
 
 
 def timeline_rank_group(row: RegisterRow) -> int:
-    """時間軸排序群組：0=有時間軸 → 1=進行中 → 2=其他開放 → 3=完成。
+    """時間軸排序群組：0=有時間軸 → 1=進行中(僅排序用) → 2=其他開放 → 3=完成。
 
     已完成永遠置底（即使曾有 Target close）。
+    Jira 狀態同步僅會在 Status 含 Done/Closed/Completed 時寫入「完成」；
+    此處「進行中」僅參考原文關鍵字，不觸發 Jira transition。
     """
-    jira_status = map_status_to_jira(jira_status_source(row))
-    if jira_status == "完成":
+    src = jira_status_source(row)
+    if map_status_to_jira(src) == JIRA_DONE_STATUS:
         return 3
     if row_has_timeline(row):
         return 0
-    if jira_status == "進行中":
+    lowered = (src or "").casefold()
+    if "in progress" in lowered or "in-progress" in lowered:
         return 1
     return 2
 
@@ -1740,13 +1672,14 @@ def ensure_epic(
 
 def get_transition_id(client: AtlassianClient, issue_key: str, target_status: str) -> str | None:
     target = normalize_jira_status_name(target_status)
+    if not target:
+        return None
     data = client.jira_get(f"/issue/{issue_key}/transitions")
     for tr in data.get("transitions", []):
-        to_name = tr.get("to", {}).get("name", "")
+        to_name = normalize_jira_status_name(tr.get("to", {}).get("name", ""))
         if to_name == target:
             return tr["id"]
-        # 簡繁／大小寫相容
-        if normalize_jira_status_name(to_name) == target:
+        if to_name.casefold() == target.casefold():
             return tr["id"]
     return None
 
@@ -1881,7 +1814,7 @@ def sync_jira_for_rows(
                 "status": DEFAULT_JIRA_STATUS,
                 "parent_key": epic_key,
             }
-            if target_status != DEFAULT_JIRA_STATUS:
+            if target_status:
                 try:
                     transition_issue(client, key, target_status, dry_run=False)
                     issue_index[row.register_id]["status"] = target_status
@@ -1916,9 +1849,14 @@ def sync_jira_for_rows(
         fields.update(timeline_fields)
         if dry_run:
             timeline_msg = f", timeline={timeline_fields}" if timeline_fields else ""
+            status_msg = (
+                f", status->{target_status}"
+                if target_status
+                else ", status=(不變)"
+            )
             print(
-                f"[dry-run] Update {known_key}: parent={epic_key}, "
-                f"status->{target_status}{timeline_msg}"
+                f"[dry-run] Update {known_key}: parent={epic_key}"
+                f"{status_msg}{timeline_msg}"
             )
         else:
             try:
@@ -1927,12 +1865,13 @@ def sync_jira_for_rows(
             except Exception as exc:  # noqa: BLE001
                 report.errors.append(f"更新 {known_key}: {exc}")
 
-            current_status = issue_index.get(row.register_id, {}).get("status", "")
-            if current_status != target_status:
-                try:
-                    transition_issue(client, known_key, target_status, dry_run=False)
-                except Exception as exc:  # noqa: BLE001
-                    report.errors.append(f"轉換狀態 {known_key}: {exc}")
+            if target_status:
+                current_status = issue_index.get(row.register_id, {}).get("status", "")
+                if current_status != target_status:
+                    try:
+                        transition_issue(client, known_key, target_status, dry_run=False)
+                    except Exception as exc:  # noqa: BLE001
+                        report.errors.append(f"轉換狀態 {known_key}: {exc}")
 
         ensure_confluence_web_link(
             client,
