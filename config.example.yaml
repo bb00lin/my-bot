@@ -16,8 +16,11 @@ notify:
   email_to: "bob.lin@qsitw.com"
   email_on_github: true
   # email_always: false
-  # smtp_host: "smtp.office365.com"
+  # mail_backend: auto   # auto|smtp|graph
+  # smtp_host: "smtp.gmail.com"   # 未設時依 MAIL_USERNAME 網域推斷；亦可設 Secret SMTP_HOST
   # smtp_port: 587
+  # Graph secrets: GRAPH_TENANT_ID / GRAPH_CLIENT_ID / GRAPH_CLIENT_SECRET
+  # graph_mailbox: "user@company.com"  # 可選；否則用 MAIL_USERNAME
 
 sharepoint:
   # Sync 腳本下載 Excel 用（必須是 download.aspx）

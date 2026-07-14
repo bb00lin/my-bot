@@ -8,6 +8,8 @@ from __future__ import annotations
 
 
 
+import os
+
 import re
 
 import sys
@@ -761,6 +763,135 @@ def main() -> int:
         and "SharePoint Register" in email_body,
         email_body[:200],
     )
+
+    # 11c. Mail backend selection / Graph payload / SMTP host inference
+    check(
+        "infer_smtp_host gmail",
+        sr.infer_smtp_host("bob@gmail.com") == "smtp.gmail.com",
+    )
+    check(
+        "infer_smtp_host googlemail",
+        sr.infer_smtp_host("bob@googlemail.com") == "smtp.gmail.com",
+    )
+    check(
+        "infer_smtp_host corp M365",
+        sr.infer_smtp_host("bob.lin@qsitw.com") == "smtp.office365.com",
+    )
+
+    saved_env = {
+        k: os.environ.pop(k, None)
+        for k in (
+            "MAIL_BACKEND",
+            "GRAPH_TENANT_ID",
+            "GRAPH_CLIENT_ID",
+            "GRAPH_CLIENT_SECRET",
+            "AZURE_TENANT_ID",
+            "AZURE_CLIENT_ID",
+            "AZURE_CLIENT_SECRET",
+            "MAIL_USERNAME",
+            "MAIL_PASSWORD",
+            "SYNC_NOTIFY_EMAIL",
+            "SMTP_HOST",
+        )
+    }
+    try:
+        check(
+            "resolve_mail_backend auto→smtp without Graph",
+            sr.resolve_mail_backend({"notify": {"mail_backend": "auto"}}) == "smtp",
+        )
+        os.environ["GRAPH_TENANT_ID"] = "tid"
+        os.environ["GRAPH_CLIENT_ID"] = "cid"
+        os.environ["GRAPH_CLIENT_SECRET"] = "sec"
+        check(
+            "resolve_mail_backend auto→graph when Graph present",
+            sr.resolve_mail_backend({"notify": {}}) == "graph",
+        )
+        check(
+            "resolve_mail_backend explicit smtp overrides Graph",
+            sr.resolve_mail_backend({"notify": {"mail_backend": "smtp"}}) == "smtp",
+        )
+        payload = sr.build_graph_send_mail_payload(
+            subject="Subj",
+            body="Body text",
+            to_addr="bob.lin@qsitw.com",
+        )
+        check(
+            "Graph sendMail payload shape",
+            payload["message"]["subject"] == "Subj"
+            and payload["message"]["body"]["contentType"] == "Text"
+            and payload["message"]["body"]["content"] == "Body text"
+            and payload["message"]["toRecipients"][0]["emailAddress"]["address"]
+            == "bob.lin@qsitw.com"
+            and payload.get("saveToSentItems") is False,
+            str(payload)[:200],
+        )
+
+        # SMTP path with mock（預設走 smtp.gmail.com）
+        import smtplib as _smtplib
+
+        class _FakeSMTP:
+            last = None
+
+            def __init__(self, host, port, timeout=None):
+                self.host = host
+                self.port = port
+                _FakeSMTP.last = self
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def ehlo(self):
+                return True
+
+            def starttls(self):
+                return True
+
+            def login(self, user, password):
+                self.user = user
+                self.password = password
+
+            def send_message(self, msg):
+                self.msg = msg
+
+        for k in (
+            "GRAPH_TENANT_ID",
+            "GRAPH_CLIENT_ID",
+            "GRAPH_CLIENT_SECRET",
+        ):
+            os.environ.pop(k, None)
+        saved_smtp = _smtplib.SMTP
+        try:
+            _smtplib.SMTP = _FakeSMTP  # type: ignore[misc,assignment]
+            os.environ["MAIL_USERNAME"] = "bot@gmail.com"
+            os.environ["MAIL_PASSWORD"] = "app-pass"
+            os.environ["SYNC_NOTIFY_EMAIL"] = "bob.lin@qsitw.com"
+            os.environ.pop("SMTP_HOST", None)
+            sr.send_diff_email(
+                {"notify": {"mail_backend": "smtp"}},
+                subject="[PMWC Sync] test",
+                body="hello",
+            )
+            fake = _FakeSMTP.last
+            check(
+                "send_diff_email SMTP uses inferred Gmail host",
+                fake is not None
+                and fake.host == "smtp.gmail.com"
+                and fake.port == 587
+                and fake.user == "bot@gmail.com"
+                and fake.msg["To"] == "bob.lin@qsitw.com",
+                f"host={getattr(fake, 'host', None)}",
+            )
+        finally:
+            _smtplib.SMTP = saved_smtp  # type: ignore[misc]
+    finally:
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     # 12. Excel download + parse
 

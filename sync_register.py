@@ -605,7 +605,196 @@ def build_diff_email_body(
     return "\n".join(lines)
 
 
-def send_diff_email(
+def _email_domain(addr: str) -> str:
+    addr = (addr or "").strip().lower()
+    if "@" not in addr:
+        return ""
+    return addr.rsplit("@", 1)[-1].strip()
+
+
+def infer_smtp_host(username: str) -> str:
+    """依寄件帳號網域推斷 SMTP（my-bot 其他腳本對 Gmail 用 smtp.gmail.com）。"""
+    domain = _email_domain(username)
+    if domain in {"gmail.com", "googlemail.com"}:
+        return "smtp.gmail.com"
+    if domain in {"outlook.com", "hotmail.com", "live.com", "msn.com"}:
+        return "smtp.office365.com"
+    # 企業網域預設走 Microsoft 365（若 Basic Auth 停用需改 Graph）
+    return "smtp.office365.com"
+
+
+def graph_credentials_present() -> bool:
+    tenant = (
+        os.environ.get("GRAPH_TENANT_ID")
+        or os.environ.get("AZURE_TENANT_ID")
+        or ""
+    ).strip()
+    client_id = (
+        os.environ.get("GRAPH_CLIENT_ID")
+        or os.environ.get("AZURE_CLIENT_ID")
+        or ""
+    ).strip()
+    client_secret = (
+        os.environ.get("GRAPH_CLIENT_SECRET")
+        or os.environ.get("AZURE_CLIENT_SECRET")
+        or ""
+    ).strip()
+    return bool(tenant and client_id and client_secret)
+
+
+def resolve_mail_backend(cfg: dict[str, Any]) -> str:
+    """回傳 mail backend：graph | smtp。
+
+    notify.mail_backend / MAIL_BACKEND：auto|smtp|graph
+    auto：有 GRAPH_/AZURE_ client credentials 則用 graph，否則 smtp。
+    """
+    notify = cfg.get("notify") or {}
+    raw = (
+        os.environ.get("MAIL_BACKEND")
+        or notify.get("mail_backend")
+        or "auto"
+    )
+    raw = str(raw).strip().lower() or "auto"
+    if raw == "auto":
+        return "graph" if graph_credentials_present() else "smtp"
+    if raw in {"smtp", "graph"}:
+        return raw
+    raise RuntimeError(
+        f"未知 mail_backend={raw!r}（允許 auto|smtp|graph）"
+    )
+
+
+def build_graph_send_mail_payload(
+    *,
+    subject: str,
+    body: str,
+    to_addr: str,
+    save_to_sent: bool = False,
+) -> dict[str, Any]:
+    """組 Microsoft Graph users/.../sendMail JSON（供單元測試 mock）。"""
+    return {
+        "message": {
+            "subject": subject,
+            "body": {"contentType": "Text", "content": body},
+            "toRecipients": [
+                {"emailAddress": {"address": to_addr}},
+            ],
+        },
+        "saveToSentItems": save_to_sent,
+    }
+
+
+def _graph_token_endpoint(tenant: str) -> str:
+    return f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+
+
+def acquire_graph_token(
+    *,
+    tenant: str,
+    client_id: str,
+    client_secret: str,
+    timeout: float = 60,
+) -> str:
+    """Client credentials 取得 Graph access token。"""
+    resp = requests.post(
+        _graph_token_endpoint(tenant),
+        data={
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scope": "https://graph.microsoft.com/.default",
+        },
+        timeout=timeout,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"Graph token 取得失敗 HTTP {resp.status_code}: {resp.text[:500]}"
+        )
+    token = (resp.json() or {}).get("access_token") or ""
+    if not token:
+        raise RuntimeError("Graph token 回應缺少 access_token")
+    return token
+
+
+def send_diff_email_graph(
+    cfg: dict[str, Any],
+    *,
+    subject: str,
+    body: str,
+) -> None:
+    """以 Microsoft Graph sendMail 寄信（需 Mail.Send application permission）。"""
+    notify = cfg.get("notify") or {}
+    to_addr = (
+        os.environ.get("SYNC_NOTIFY_EMAIL")
+        or notify.get("email_to")
+        or "bob.lin@qsitw.com"
+    ).strip()
+    from_addr = (
+        os.environ.get("GRAPH_MAILBOX")
+        or os.environ.get("MAIL_USERNAME")
+        or notify.get("smtp_user")
+        or notify.get("graph_mailbox")
+        or ""
+    ).strip()
+    tenant = (
+        os.environ.get("GRAPH_TENANT_ID")
+        or os.environ.get("AZURE_TENANT_ID")
+        or notify.get("graph_tenant_id")
+        or ""
+    ).strip()
+    client_id = (
+        os.environ.get("GRAPH_CLIENT_ID")
+        or os.environ.get("AZURE_CLIENT_ID")
+        or notify.get("graph_client_id")
+        or ""
+    ).strip()
+    client_secret = (
+        os.environ.get("GRAPH_CLIENT_SECRET")
+        or os.environ.get("AZURE_CLIENT_SECRET")
+        or notify.get("graph_client_secret")
+        or ""
+    ).strip()
+
+    if not from_addr:
+        raise RuntimeError(
+            "Graph 寄信失敗：缺少 GRAPH_MAILBOX / MAIL_USERNAME（寄件信箱）"
+        )
+    if not (tenant and client_id and client_secret):
+        raise RuntimeError(
+            "Graph 寄信失敗：缺少 GRAPH_TENANT_ID / GRAPH_CLIENT_ID / "
+            "GRAPH_CLIENT_SECRET（或 AZURE_* 同義）"
+        )
+
+    print(
+        f"Graph 準備寄信: mailbox={from_addr} to={to_addr} "
+        f"tenant_set=True client_id_set=True"
+    )
+    token = acquire_graph_token(
+        tenant=tenant, client_id=client_id, client_secret=client_secret
+    )
+    payload = build_graph_send_mail_payload(
+        subject=subject, body=body, to_addr=to_addr
+    )
+    url = (
+        "https://graph.microsoft.com/v1.0/users/"
+        f"{requests.utils.quote(from_addr, safe='@')}/sendMail"
+    )
+    resp = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=60,
+    )
+    if resp.status_code not in (202, 200):
+        raise RuntimeError(
+            f"Graph sendMail 失敗 HTTP {resp.status_code}: {resp.text[:800]}"
+        )
+
+
+def send_diff_email_smtp(
     cfg: dict[str, Any],
     *,
     subject: str,
@@ -613,7 +802,10 @@ def send_diff_email(
 ) -> None:
     """透過 SMTP 寄出差異報告（GitHub Secrets: MAIL_USERNAME / MAIL_PASSWORD）。
 
-    Office365：smtp.office365.com:587 + STARTTLS；From 必須等於 MAIL_USERNAME。
+    主機推斷：明確 SMTP_HOST / notify.smtp_host 優先；否則依 MAIL_USERNAME 網域
+   （gmail → smtp.gmail.com；其餘預設 smtp.office365.com）。
+    my-bot 內 guardian_bot / DailyStockPush 使用同一組 MAIL_* + smtp.gmail.com。
+    From 固定為 MAIL_USERNAME。
     """
     notify = cfg.get("notify") or {}
     to_addr = (
@@ -634,10 +826,10 @@ def send_diff_email(
     host = (
         os.environ.get("SMTP_HOST")
         or notify.get("smtp_host")
-        or "smtp.office365.com"
+        or (infer_smtp_host(user) if user else "")
+        or "smtp.gmail.com"
     ).strip()
     port = int(os.environ.get("SMTP_PORT") or notify.get("smtp_port") or 587)
-    # Office365 要求 From 與登入帳號一致
     from_addr = user
 
     if not user or not password:
@@ -645,9 +837,11 @@ def send_diff_email(
             "寄信失敗：缺少 MAIL_USERNAME / MAIL_PASSWORD（或 notify.smtp_*）"
         )
 
+    user_domain = _email_domain(user) or "?"
     print(
-        f"SMTP 準備寄信: host={host}:{port} user={user} from={from_addr} "
-        f"to={to_addr} password_set=True password_len={len(password)}"
+        f"SMTP 準備寄信: host={host}:{port} user_domain={user_domain} "
+        f"from={from_addr} to={to_addr} password_set=True "
+        f"password_len={len(password)}"
     )
 
     msg = EmailMessage()
@@ -668,18 +862,42 @@ def send_diff_email(
         hint = ""
         if "5.7.139" in err or "basic authentication is disabled" in err.lower():
             hint = (
-                " 提示：此租戶已停用 SMTP Basic Auth。"
-                "請為 MAIL_USERNAME 啟用 Authenticated SMTP，"
-                "並將 MAIL_PASSWORD 改為「應用程式密碼」（非登入密碼）；"
-                "From 已固定為 MAIL_USERNAME。"
+                " 提示：目標伺服器已停用 SMTP Basic Auth。"
+                "若 MAIL_USERNAME 為 Gmail，請設 SMTP_HOST=smtp.gmail.com"
+                "（或依賴網域自動推斷）；"
+                "若為 Microsoft 365，請改 Graph"
+                "（GRAPH_TENANT_ID/CLIENT_ID/CLIENT_SECRET + Mail.Send）"
+                "或啟用 Authenticated SMTP / 應用程式密碼。"
+            )
+        elif "gmail" in host.lower():
+            hint = (
+                " 提示：請確認 MAIL_USERNAME / MAIL_PASSWORD 為"
+                " Gmail 應用程式密碼（與 guardian_bot 相同）。"
             )
         raise RuntimeError(
-            f"SMTP 認證失敗 ({host}:{port}, user={user}): {exc}.{hint}"
+            f"SMTP 認證失敗 ({host}:{port}, user_domain={user_domain}): "
+            f"{exc}.{hint}"
         ) from exc
     except smtplib.SMTPException as exc:
         raise RuntimeError(
-            f"SMTP 寄信失敗 ({host}:{port}, user={user}, from={from_addr}, to={to_addr}): {exc}"
+            f"SMTP 寄信失敗 ({host}:{port}, user_domain={user_domain}, "
+            f"from={from_addr}, to={to_addr}): {exc}"
         ) from exc
+
+
+def send_diff_email(
+    cfg: dict[str, Any],
+    *,
+    subject: str,
+    body: str,
+) -> None:
+    """依 notify.mail_backend（auto|smtp|graph）寄出差異報告。"""
+    backend = resolve_mail_backend(cfg)
+    print(f"郵件後端: {backend}")
+    if backend == "graph":
+        send_diff_email_graph(cfg, subject=subject, body=body)
+    else:
+        send_diff_email_smtp(cfg, subject=subject, body=body)
 
 
 def deliver_diff_report(
@@ -728,6 +946,10 @@ def deliver_diff_report(
         except Exception as exc:  # noqa: BLE001
             report.errors.append(f"寄送差異郵件: {exc}")
             print(f"警告: 寄送差異郵件失敗: {exc}")
+            if is_github_actions():
+                report.errors.append(
+                    "GITHUB_ACTIONS 寄信失敗，將以非零結束碼退出"
+                )
 
     return diff_text
 
@@ -2090,6 +2312,12 @@ def main() -> None:
         print_report(report)
     except Exception as exc:  # noqa: BLE001
         print(f"同步失敗: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    # GitHub Actions：寄信失敗必須讓 workflow 變紅，避免漏通知
+    if is_github_actions() and any(
+        "寄送差異郵件" in err for err in report.errors
+    ):
         sys.exit(1)
 
 
