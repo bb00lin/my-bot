@@ -37,6 +37,8 @@ JIRA_KEY_RE = re.compile(r"PMWC-\d+")
 CONFLUENCE_JIRA_LINK_RE = re.compile(
     r"\[?(PMWC-\d+)\]?\(?https?://[^)\s|]+/browse/(PMWC-\d+)\)?"
 )
+# S 表重複 Register ID 時，Jira summary 最前方標記（格式：ID重複 {ID}_{Title}）
+DUPLICATE_ID_SUMMARY_PREFIX = "ID重複"
 
 S_COLUMNS = [
     "ID",
@@ -1815,10 +1817,26 @@ def assign_unassigned_register_issues(
             )
 
 
-def jira_summary(register_id: str, title: str) -> str:
-    """Jira 任務名稱 = C 表 ID + Title，以 _ 連接。"""
+def find_duplicate_register_ids(rows: list[RegisterRow]) -> set[str]:
+    """回傳在 rows 中出現超過一次的 register_id（大小寫已正規化）。"""
+    counts: dict[str, int] = {}
+    for row in rows:
+        rid = (row.register_id or "").strip()
+        if not rid:
+            continue
+        counts[rid] = counts.get(rid, 0) + 1
+    return {rid for rid, n in counts.items() if n > 1}
+
+
+def jira_summary(
+    register_id: str, title: str, *, duplicate: bool = False
+) -> str:
+    """Jira 任務名稱 = ID_Title；S 表 ID 重複時最前方加「ID重複」。"""
     safe_title = title.replace("\n", " ").strip()
-    return f"{register_id}_{safe_title}"[:255]
+    base = f"{register_id}_{safe_title}"
+    if duplicate:
+        base = f"{DUPLICATE_ID_SUMMARY_PREFIX} {base}"
+    return base[:255]
 
 
 def text_to_adf(text: str) -> dict[str, Any]:
@@ -1921,10 +1939,25 @@ def ensure_confluence_web_link(
         report.errors.append(f"Web 連結 {issue_key}: {exc}")
 
 
+def strip_duplicate_id_summary_prefix(summary: str) -> str:
+    """移除 summary 最前方的「ID重複」標記（含空白或底線分隔）。"""
+    text = (summary or "").strip()
+    markers = (
+        f"{DUPLICATE_ID_SUMMARY_PREFIX} ",
+        f"{DUPLICATE_ID_SUMMARY_PREFIX}_",
+        DUPLICATE_ID_SUMMARY_PREFIX,
+    )
+    for marker in markers:
+        if text.startswith(marker):
+            return text[len(marker) :].lstrip(" _")
+    return text
+
+
 def parse_register_id_from_summary(summary: str) -> str | None:
-    if "_" not in summary:
+    text = strip_duplicate_id_summary_prefix(summary)
+    if "_" not in text:
         return None
-    prefix = summary.split("_", 1)[0].strip().upper()
+    prefix = text.split("_", 1)[0].strip().upper()
     if REGISTER_ID_RE.match(prefix):
         return prefix
     return None
@@ -2120,6 +2153,10 @@ def sync_jira_for_rows(
 
     current_ids = {r.register_id for r in rows}
     id_to_key: dict[str, str] = dict(existing_jira_map)
+    duplicate_ids = find_duplicate_register_ids(rows)
+    if duplicate_ids:
+        dup_list = ", ".join(sorted(duplicate_ids))
+        print(f"警告: S 表重複 Register ID（Jira 標題加前綴「{DUPLICATE_ID_SUMMARY_PREFIX}」）: {dup_list}")
 
     # 刪除 C 表已不存在的項目（Jira 與 C 表保持一致）
     for rid, info in issue_index.items():
@@ -2140,7 +2177,11 @@ def sync_jira_for_rows(
             client, project, epic_type, priority, epic_map, report, dry_run
         )
         target_status = map_status_to_jira(jira_status_source(row))
-        summary = jira_summary(row.register_id, row.title)
+        summary = jira_summary(
+            row.register_id,
+            row.title,
+            duplicate=row.register_id in duplicate_ids,
+        )
         description = build_jira_description(row)
 
         existing = issue_index.get(row.register_id)

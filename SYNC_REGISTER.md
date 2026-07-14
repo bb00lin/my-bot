@@ -26,6 +26,7 @@ Jira PMWC（P1/P2/P3… 大型工作底下的任務）
 | Jira 父子關係 | 任務透過 `parent` 欄位掛在 Priority Epic 下（僅 Jira 麵包屑，**不**建立 issue link） |
 | S 已刪除的 ID | 對應 Jira 任務一併**刪除** |
 | Jira 任務名稱 | `ID_Title`（例：`RF-05_BT Rx max-input-level sweep to +10 dBm`） |
+| S 表 ID 重複 | 該 ID 的**所有**列：Jira 標題最前方加 `ID重複 `（例：`ID重複 RF-14_Some title`）；唯一後下次同步會拿掉 |
 | Closed 狀態 | 建立 Jira 並設為「完成」，LINK 欄仍回寫 PMWC 連結 |
 
 ### Status 對應（子字串優先順序）

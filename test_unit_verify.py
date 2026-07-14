@@ -643,6 +643,46 @@ def main() -> int:
         )
         == "RF-05_BT Rx max-input-level sweep to +10 dBm",
     )
+    check(
+        "Jira summary ID重複前綴",
+        sr.jira_summary("RF-14", "Some title", duplicate=True)
+        == "ID重複 RF-14_Some title"
+        and sr.jira_summary("RF-14", "Some title", duplicate=False)
+        == "RF-14_Some title",
+    )
+    check(
+        "parse summary 含 ID重複前綴",
+        sr.parse_register_id_from_summary("ID重複 RF-14_Some title") == "RF-14"
+        and sr.parse_register_id_from_summary("ID重複_RF-14_Some title") == "RF-14"
+        and sr.parse_register_id_from_summary("RF-14_Some title") == "RF-14",
+    )
+    dup_rows = [
+        sr.RegisterRow(register_id="RF-01", title="A"),
+        sr.RegisterRow(register_id="RF-02", title="B"),
+        sr.RegisterRow(register_id="RF-01", title="A2"),
+        sr.RegisterRow(register_id="RF-03", title="C"),
+    ]
+    dups = sr.find_duplicate_register_ids(dup_rows)
+    check(
+        "偵測 S 表重複 Register ID",
+        dups == {"RF-01"},
+        str(dups),
+    )
+    # 唯一後不應再加前綴（模擬下次 sync）
+    unique_again = [
+        sr.RegisterRow(register_id="RF-01", title="Only one"),
+        sr.RegisterRow(register_id="RF-02", title="B"),
+    ]
+    check(
+        "重複解決後 summary 無 ID重複前綴",
+        not sr.find_duplicate_register_ids(unique_again)
+        and sr.jira_summary(
+            "RF-01",
+            "Only one",
+            duplicate="RF-01" in sr.find_duplicate_register_ids(unique_again),
+        )
+        == "RF-01_Only one",
+    )
 
     rank_rows = [
         sr.RegisterRow(register_id="A-1", priority="P1", status="Closed"),
