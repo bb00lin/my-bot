@@ -1084,6 +1084,7 @@ def main() -> int:
             "MAIL_USERNAME",
             "MAIL_PASSWORD",
             "SYNC_NOTIFY_EMAIL",
+            "SYNC_NOTIFY_CC",
             "SMTP_HOST",
         )
     }
@@ -1103,20 +1104,51 @@ def main() -> int:
             "resolve_mail_backend explicit smtp overrides Graph",
             sr.resolve_mail_backend({"notify": {"mail_backend": "smtp"}}) == "smtp",
         )
+
+        to_list, cc_list = sr.resolve_notify_recipients(
+            {
+                "notify": {
+                    "email_to": "bob.lin@qsitw.com",
+                    "email_cc": "shannon.chang@qsitw.com",
+                }
+            }
+        )
+        check(
+            "resolve_notify_recipients To/Cc split from config",
+            to_list == ["bob.lin@qsitw.com"]
+            and cc_list == ["shannon.chang@qsitw.com"],
+            f"to={to_list} cc={cc_list}",
+        )
+        os.environ["SYNC_NOTIFY_EMAIL"] = "bob.lin@qsitw.com"
+        os.environ["SYNC_NOTIFY_CC"] = "shannon.chang@qsitw.com"
+        to_env, cc_env = sr.resolve_notify_recipients({"notify": {}})
+        check(
+            "resolve_notify_recipients from SYNC_NOTIFY_* env",
+            to_env == ["bob.lin@qsitw.com"]
+            and cc_env == ["shannon.chang@qsitw.com"],
+            f"to={to_env} cc={cc_env}",
+        )
+        os.environ.pop("SYNC_NOTIFY_EMAIL", None)
+        os.environ.pop("SYNC_NOTIFY_CC", None)
+
         payload = sr.build_graph_send_mail_payload(
             subject="Subj",
             body="Body text",
             to_addr="bob.lin@qsitw.com",
+            cc_addrs="shannon.chang@qsitw.com",
         )
         check(
-            "Graph sendMail payload shape",
+            "Graph sendMail payload shape with Cc",
             payload["message"]["subject"] == "Subj"
             and payload["message"]["body"]["contentType"] == "Text"
             and payload["message"]["body"]["content"] == "Body text"
             and payload["message"]["toRecipients"][0]["emailAddress"]["address"]
             == "bob.lin@qsitw.com"
+            and len(payload["message"]["toRecipients"]) == 1
+            and payload["message"]["ccRecipients"][0]["emailAddress"]["address"]
+            == "shannon.chang@qsitw.com"
             and payload.get("saveToSentItems") is False,
-            str(payload)[:200],
+            str(payload)[:240],
         )
         payload_html = sr.build_graph_send_mail_payload(
             subject="Subj",
@@ -1127,7 +1159,8 @@ def main() -> int:
         check(
             "Graph sendMail HTML contentType",
             payload_html["message"]["body"]["contentType"] == "HTML"
-            and "color:red" in payload_html["message"]["body"]["content"],
+            and "color:red" in payload_html["message"]["body"]["content"]
+            and "ccRecipients" not in payload_html["message"],
             str(payload_html["message"]["body"])[:200],
         )
 
@@ -1226,8 +1259,14 @@ def main() -> int:
             os.environ["MAIL_PASSWORD"] = "app-pass"
             os.environ["SYNC_NOTIFY_EMAIL"] = "bob.lin@qsitw.com"
             os.environ.pop("SMTP_HOST", None)
+            os.environ.pop("SYNC_NOTIFY_CC", None)
             sr.send_diff_email(
-                {"notify": {"mail_backend": "smtp"}},
+                {
+                    "notify": {
+                        "mail_backend": "smtp",
+                        "email_cc": "shannon.chang@qsitw.com",
+                    }
+                },
                 subject="[PMWC Sync] test",
                 body="【有差異】\nhello",
                 html_body=(
@@ -1256,6 +1295,14 @@ def main() -> int:
                 and fake.user == "bot@gmail.com"
                 and fake.msg["To"] == "bob.lin@qsitw.com",
                 f"host={getattr(fake, 'host', None)}",
+            )
+            check(
+                "send_diff_email SMTP sets Cc header separately",
+                fake is not None
+                and fake.msg["Cc"] == "shannon.chang@qsitw.com"
+                and fake.msg["To"] == "bob.lin@qsitw.com",
+                f"To={getattr(getattr(fake, 'msg', None), '__getitem__', lambda k: None)('To')} "
+                f"Cc={getattr(getattr(fake, 'msg', None), '__getitem__', lambda k: None)('Cc')}",
             )
             check(
                 "send_diff_email SMTP multipart/alternative HTML",

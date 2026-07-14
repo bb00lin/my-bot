@@ -1,18 +1,19 @@
 # SharePoint → Confluence → Jira 同步
-# 主要排程：GitHub Actions cron（台灣 09:00 / 17:00）
+# 主要排程：GitHub Actions cron（台灣每天 00:00 = UTC 16:00）
 # 亦可：workflow_dispatch 手動、repository_dispatch
 #
 # 寄信：與 Confluence Weekly2 Report（confluence_api2）相同
 #   Secrets: MAIL_USERNAME / MAIL_PASSWORD（Gmail 應用程式密碼）
 #   Host:    smtp.gmail.com:587（寫死在 sync_register.py，勿改 O365）
+#   To:      SYNC_NOTIFY_EMAIL（僅主收件人）或 config notify.email_to
+#   Cc:      SYNC_NOTIFY_CC 或 config notify.email_cc（走 Cc header，勿併入 To）
 name: Sync Register
 
 on:
   schedule:
     # Primary unattended schedule (Taiwan UTC+8)
-    # 09:00 → 01:00 UTC；17:00 → 09:00 UTC
-    - cron: "0 1 * * *"
-    - cron: "0 9 * * *"
+    # 00:00 Taiwan → 16:00 UTC（前一日）
+    - cron: "0 16 * * *"
   workflow_dispatch:
   repository_dispatch:
     types: [sync-register]
@@ -75,8 +76,15 @@ jobs:
           # 與 Confluence Weekly2 / guardian / cosing 相同
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
-          # 可選：覆寫收件人（未設則用 config notify.email_to / 預設 bb00lin@gmail.com）
+          # To：僅主收件人（未設則用 config notify.email_to）
           SYNC_NOTIFY_EMAIL: ${{ secrets.SYNC_NOTIFY_EMAIL }}
+          # Cc：可選；未設則用 config notify.email_cc
+          SYNC_NOTIFY_CC: ${{ secrets.SYNC_NOTIFY_CC }}
+          # Graph（有設則優先於 SMTP）
+          GRAPH_TENANT_ID: ${{ secrets.GRAPH_TENANT_ID }}
+          GRAPH_CLIENT_ID: ${{ secrets.GRAPH_CLIENT_ID }}
+          GRAPH_CLIENT_SECRET: ${{ secrets.GRAPH_CLIENT_SECRET }}
+          GRAPH_MAILBOX: ${{ secrets.GRAPH_MAILBOX }}
         run: python sync_register.py
 
       - name: Upload diff artifacts

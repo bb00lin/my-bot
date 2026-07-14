@@ -14,6 +14,10 @@ silent_mode: true
 # - GitHub Actions：寄信（無差異也寄），並附 S 表格連結
 notify:
   email_to: "bob.lin@qsitw.com"
+  # Cc 可為字串或 list；與 To 分離（勿把 Cc 寫進 email_to）
+  email_cc: "shannon.chang@qsitw.com"
+  # email_cc:
+  #   - "shannon.chang@qsitw.com"
   email_on_github: true
   # email_always: false
   # mail_backend: auto   # auto|smtp|graph

@@ -782,6 +782,52 @@ def _email_domain(addr: str) -> str:
     return addr.rsplit("@", 1)[-1].strip()
 
 
+def normalize_email_addrs(value: Any) -> list[str]:
+    """將 email_to / email_cc（字串、list、逗號／分號分隔）正規成地址清單。"""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_items = [str(x) for x in value]
+    else:
+        raw_items = re.split(r"[,;\s]+", str(value))
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        addr = item.strip()
+        if not addr or "@" not in addr:
+            continue
+        key = addr.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(addr)
+    return out
+
+
+def resolve_notify_recipients(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """回傳 (To, Cc)。To／Cc 分離；勿把 Cc 併入 To。
+
+    To：SYNC_NOTIFY_EMAIL → notify.email_to → bob.lin@qsitw.com
+    Cc：SYNC_NOTIFY_CC → notify.email_cc（可為字串或 list）
+    """
+    notify = cfg.get("notify") or {}
+    to_raw = os.environ.get("SYNC_NOTIFY_EMAIL")
+    if to_raw is None or not str(to_raw).strip():
+        to_raw = notify.get("email_to")
+    to_addrs = normalize_email_addrs(to_raw)
+    if not to_addrs:
+        to_addrs = ["bob.lin@qsitw.com"]
+
+    cc_raw = os.environ.get("SYNC_NOTIFY_CC")
+    if cc_raw is None or not str(cc_raw).strip():
+        cc_raw = notify.get("email_cc")
+    cc_addrs = normalize_email_addrs(cc_raw)
+    # 避免同一人同時出現在 To 與 Cc
+    to_keys = {a.lower() for a in to_addrs}
+    cc_addrs = [a for a in cc_addrs if a.lower() not in to_keys]
+    return to_addrs, cc_addrs
+
+
 def infer_smtp_host(username: str) -> str:
     """依寄件帳號網域推斷 SMTP（my-bot 其他腳本對 Gmail 用 smtp.gmail.com）。"""
     domain = _email_domain(username)
@@ -838,13 +884,15 @@ def build_graph_send_mail_payload(
     *,
     subject: str,
     body: str,
-    to_addr: str,
+    to_addr: str | list[str],
     save_to_sent: bool = False,
     html_body: str | None = None,
+    cc_addrs: str | list[str] | None = None,
 ) -> dict[str, Any]:
     """組 Microsoft Graph users/.../sendMail JSON（供單元測試 mock）。
 
     有 html_body 時以 HTML 寄出（紅色「有差異」等）；否則 Text。
+    Cc 走 ccRecipients，不可併入 toRecipients。
     """
     if html_body:
         content_type = "HTML"
@@ -852,14 +900,23 @@ def build_graph_send_mail_payload(
     else:
         content_type = "Text"
         content = body
+    to_list = normalize_email_addrs(to_addr)
+    if not to_list:
+        raise ValueError("build_graph_send_mail_payload: To 收件人不可為空")
+    message: dict[str, Any] = {
+        "subject": subject,
+        "body": {"contentType": content_type, "content": content},
+        "toRecipients": [
+            {"emailAddress": {"address": addr}} for addr in to_list
+        ],
+    }
+    cc_list = normalize_email_addrs(cc_addrs)
+    if cc_list:
+        message["ccRecipients"] = [
+            {"emailAddress": {"address": addr}} for addr in cc_list
+        ]
     return {
-        "message": {
-            "subject": subject,
-            "body": {"contentType": content_type, "content": content},
-            "toRecipients": [
-                {"emailAddress": {"address": to_addr}},
-            ],
-        },
+        "message": message,
         "saveToSentItems": save_to_sent,
     }
 
@@ -905,11 +962,9 @@ def send_diff_email_graph(
 ) -> None:
     """以 Microsoft Graph sendMail 寄信（需 Mail.Send application permission）。"""
     notify = cfg.get("notify") or {}
-    to_addr = (
-        os.environ.get("SYNC_NOTIFY_EMAIL")
-        or notify.get("email_to")
-        or "bob.lin@qsitw.com"
-    ).strip()
+    to_addrs, cc_addrs = resolve_notify_recipients(cfg)
+    to_addr = ", ".join(to_addrs)
+    cc_disp = ", ".join(cc_addrs) if cc_addrs else "(none)"
     from_addr = (
         os.environ.get("GRAPH_MAILBOX")
         or os.environ.get("MAIL_USERNAME")
@@ -947,14 +1002,18 @@ def send_diff_email_graph(
         )
 
     print(
-        f"Graph 準備寄信: mailbox={from_addr} to={to_addr} "
+        f"Graph 準備寄信: mailbox={from_addr} to={to_addr} cc={cc_disp} "
         f"tenant_set=True client_id_set=True"
     )
     token = acquire_graph_token(
         tenant=tenant, client_id=client_id, client_secret=client_secret
     )
     payload = build_graph_send_mail_payload(
-        subject=subject, body=body, to_addr=to_addr, html_body=html_body
+        subject=subject,
+        body=body,
+        to_addr=to_addrs,
+        html_body=html_body,
+        cc_addrs=cc_addrs,
     )
     url = (
         "https://graph.microsoft.com/v1.0/users/"
@@ -991,11 +1050,9 @@ def send_diff_email_smtp(
     有 html_body 時以 multipart/alternative（text + html）寄出。
     """
     notify = cfg.get("notify") or {}
-    to_addr = (
-        os.environ.get("SYNC_NOTIFY_EMAIL")
-        or notify.get("email_to")
-        or "bob.lin@qsitw.com"
-    ).strip()
+    to_addrs, cc_addrs = resolve_notify_recipients(cfg)
+    to_addr = ", ".join(to_addrs)
+    cc_disp = ", ".join(cc_addrs) if cc_addrs else "(none)"
     user = (
         os.environ.get("MAIL_USERNAME")
         or notify.get("smtp_user")
@@ -1023,7 +1080,7 @@ def send_diff_email_smtp(
     user_domain = _email_domain(user) or "?"
     print(
         f"SMTP 準備寄信: host={host}:{port} user_domain={user_domain} "
-        f"from={from_addr} to={to_addr} password_set=True "
+        f"from={from_addr} to={to_addr} cc={cc_disp} password_set=True "
         f"password_len={len(password)}"
     )
 
@@ -1031,6 +1088,8 @@ def send_diff_email_smtp(
     msg["Subject"] = subject
     msg["From"] = from_addr
     msg["To"] = to_addr
+    if cc_addrs:
+        msg["Cc"] = ", ".join(cc_addrs)
     msg.set_content(body)
     if html_body:
         msg.add_alternative(html_body, subtype="html")
