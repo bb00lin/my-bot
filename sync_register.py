@@ -1617,16 +1617,16 @@ def build_timeline_fields(
 ) -> dict[str, str]:
     """設定 Jira Timeline：Opened → 起始日；Target close → 截止日。
 
-    - Opened 有值：寫入 Start date（customfield_10015 / jira.start_date_field）
-    - Target close 有值：寫入 Due date（duedate / jira.due_date_field）
-    - 兩者皆有：兩者都寫；若 due < start 則把 due 順延至隔年
-    - 僅 Opened：只寫 Start，不碰 Due（不需 Target close）
-    - 僅 Target close：只寫 Due，不以 sync_date 填 Start
-    - 兩者皆空：不更新任何日期欄位
+    嚴格規則（空白／無法解析 → 不出現在回傳 dict，Jira 更新不會動該欄）：
+    - 儲存格空白／空字串 → 省略對應欄位，**不變更** Jira 既有值
+    - 有內容但無法解析為日期 → 忽略，**不變更** Jira
+    - 成功解析 → 寫入該欄（Start＝Opened，Due＝Target close）
+    - 兩者皆成功解析且 due < start → 僅此時將 due 年 +1
+    - 絕不回填 sync_date、不以 null/None 清空欄位
 
-    sync_date 保留供呼叫端相容；目前不再用於回填 Start。
+    sync_date 保留供呼叫端相容；不參與日期推導。
     """
-    del sync_date  # 保留參數簽名；日期僅依 Opened / Target close
+    del sync_date  # 保留參數簽名；日期僅依成功解析的 Opened / Target close
     opened = parse_flexible_date(row.opened)
     due = parse_flexible_date(row.target_close)
     if not opened and not due:
@@ -1641,6 +1641,7 @@ def build_timeline_fields(
         out[start_field] = opened
 
     if due:
+        # year+1 僅在「本 run 兩者皆自表格解析成功」時套用
         if opened:
             due_dt = datetime.strptime(due, "%Y-%m-%d")
             start_dt = datetime.strptime(opened, "%Y-%m-%d")

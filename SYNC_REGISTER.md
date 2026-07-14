@@ -42,17 +42,19 @@ Jira PMWC（P1/P2/P3… 大型工作底下的任務）
 
 ### Timeline 日期（Jira 時間軸）
 
-| S 表欄位 | Jira 欄位 | 規則 |
-|----------|-----------|------|
-| **Opened** | Start date（`customfield_10015` / `jira.start_date_field`） | 可解析即寫入起始日（不需 Target close） |
-| **Target close** | Due date（`duedate` / `jira.due_date_field`） | 可解析即寫入到期日；兩者皆有且 due < start 時順延至隔年 |
+| S 表儲存格 | Jira 欄位 | 行為 |
+|------------|-----------|------|
+| **空白／空字串** | Start（Opened）或 Due（Target close） | **不變更** Jira 既有值（payload 省略該欄） |
+| **有內容但無法解析為日期** | 同上 | **忽略**，不變更 Jira |
+| **成功解析為日期** | Opened → Start、Target close → Due | 寫入解析後的 `YYYY-MM-DD` |
+| **兩者皆成功解析且 due < start** | Due | 將 due **年 +1**（僅兩邊都自本 run 表格解析時） |
 
 補充：
 
-- 僅有 Opened：只更新 Start，**不清除**既有 Due
-- 僅有 Target close：只更新 Due，**不以同步日填 Start**
-- 兩者皆有：同時寫入 Start + Due（due < start → due 年 +1）
-- 兩者皆空：不更新任何日期欄位
+- 絕不使用 `sync_date` 回填 Start，也不以 `null`/`None` 清空日期欄
+- 僅有 Opened 可解析：只更新 Start，**不碰** Due
+- 僅有 Target close 可解析：只更新 Due，**不碰** Start
+- create／update 皆只 `update` 有成功解析的欄位
 
 支援日期格式：`2026-07-30`、`7/30`、`7/30/2026`、`7/30/26`、`7月31日`、`2026年7月31日`、Excel 序號等。
 

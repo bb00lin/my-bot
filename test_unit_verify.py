@@ -372,6 +372,78 @@ def main() -> int:
         sr.build_timeline_fields(row_empty, sync_date, cfg) == {},
     )
 
+    # 空白／無法解析 → 不寫入對應 Jira 欄（omit，不清空）
+    row_blank_opened = sr.RegisterRow(
+        register_id="RF-10",
+        opened="",
+        target_close="2026-09-01",
+    )
+    tl_blank_opened = sr.build_timeline_fields(row_blank_opened, sync_date, cfg)
+    check(
+        "7. 空白 Opened → 無 Start（僅 Due）",
+        tl_blank_opened == {"duedate": "2026-09-01"},
+        str(tl_blank_opened),
+    )
+
+    row_blank_due = sr.RegisterRow(
+        register_id="RF-11",
+        opened="2026-05-01",
+        target_close="",
+    )
+    tl_blank_due = sr.build_timeline_fields(row_blank_due, sync_date, cfg)
+    check(
+        "7. 空白 Target close → 無 Due（僅 Start）",
+        tl_blank_due == {"customfield_10015": "2026-05-01"},
+        str(tl_blank_due),
+    )
+
+    row_garbage = sr.RegisterRow(
+        register_id="RF-12",
+        opened="TBD",
+        target_close="asap / next week",
+    )
+    check(
+        "7. 無法解析文字 → 不更新 Start/Due",
+        sr.build_timeline_fields(row_garbage, sync_date, cfg) == {},
+    )
+
+    row_garbage_opened = sr.RegisterRow(
+        register_id="RF-13g",
+        opened="N/A",
+        target_close="2026-10-15",
+    )
+    tl_garbage_opened = sr.build_timeline_fields(row_garbage_opened, sync_date, cfg)
+    check(
+        "7. Opened 垃圾文字 + 有效 Due → 僅 Due",
+        tl_garbage_opened == {"duedate": "2026-10-15"},
+        str(tl_garbage_opened),
+    )
+
+    row_garbage_due = sr.RegisterRow(
+        register_id="RF-14g",
+        opened="2026-04-20",
+        target_close="待定",
+    )
+    tl_garbage_due = sr.build_timeline_fields(row_garbage_due, sync_date, cfg)
+    check(
+        "7. 有效 Opened + Due 垃圾文字 → 僅 Start",
+        tl_garbage_due == {"customfield_10015": "2026-04-20"},
+        str(tl_garbage_due),
+    )
+
+    # 僅一邊可解析時不做 year+1（due 雖 < 當年度某日，但無 parsed start）
+    row_due_only_early = sr.RegisterRow(
+        register_id="RF-15g",
+        opened="",
+        target_close="1/15",
+    )
+    tl_due_early = sr.build_timeline_fields(row_due_only_early, sync_date, cfg)
+    check(
+        "7. 僅 Due 可解析時不做 year+1",
+        tl_due_early == {"duedate": f"{year}-01-15"},
+        str(tl_due_early),
+    )
+
 
 
     # 5. HTML table — no blank rows, LINK in last column (items 2, 3)
