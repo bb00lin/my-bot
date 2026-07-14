@@ -1,6 +1,10 @@
-﻿# SharePoint → Confluence → Jira 同步
+# SharePoint → Confluence → Jira 同步
 # 主要排程：GitHub Actions cron（台灣 09:00 / 17:00）
 # 亦可：workflow_dispatch 手動、repository_dispatch
+#
+# 寄信：與 Confluence Weekly2 Report（confluence_api2）相同
+#   Secrets: MAIL_USERNAME / MAIL_PASSWORD（Gmail 應用程式密碼）
+#   Host:    smtp.gmail.com:587（寫死在 sync_register.py，勿改 O365）
 name: Sync Register
 
 on:
@@ -67,19 +71,11 @@ jobs:
 
       - name: Run sync_register.py
         env:
+          # 與 Confluence Weekly2 / guardian / cosing 相同
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          MAIL_BACKEND: ${{ secrets.MAIL_BACKEND }}
+          # 可選：覆寫收件人（未設則用 config notify.email_to / 預設 bb00lin@gmail.com）
           SYNC_NOTIFY_EMAIL: ${{ secrets.SYNC_NOTIFY_EMAIL }}
-          GRAPH_TENANT_ID: ${{ secrets.GRAPH_TENANT_ID }}
-          GRAPH_CLIENT_ID: ${{ secrets.GRAPH_CLIENT_ID }}
-          GRAPH_CLIENT_SECRET: ${{ secrets.GRAPH_CLIENT_SECRET }}
-          GRAPH_MAILBOX: ${{ secrets.GRAPH_MAILBOX }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         run: python sync_register.py
 
       - name: Upload diff artifacts
