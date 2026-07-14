@@ -1,19 +1,8 @@
 # SharePoint → Confluence → Jira 同步
-# 主要排程：GitHub Actions cron（台灣每天 00:00 = UTC 16:00）
-# 亦可：workflow_dispatch 手動、repository_dispatch
-#
-# 寄信：與 Confluence Weekly2 Report（confluence_api2）相同
-#   Secrets: MAIL_USERNAME / MAIL_PASSWORD（Gmail 應用程式密碼）
-#   Host:    smtp.gmail.com:587（寫死在 sync_register.py，勿改 O365）
-#   To:      SYNC_NOTIFY_EMAIL（僅主收件人）或 config notify.email_to
-#   Cc:      SYNC_NOTIFY_CC 或 config notify.email_cc（走 Cc header，勿併入 To）
+# 僅手動觸發：workflow_dispatch / repository_dispatch（無 cron 自動排程）
 name: Sync Register
 
 on:
-  schedule:
-    # Primary unattended schedule (Taiwan UTC+8)
-    # 00:00 Taiwan → 16:00 UTC（前一日）
-    - cron: "0 16 * * *"
   workflow_dispatch:
   repository_dispatch:
     types: [sync-register]
@@ -51,13 +40,12 @@ jobs:
           CONFIG_YAML: ${{ secrets.CONFIG_YAML }}
         run: |
           if [ -n "$CONFIG_YAML" ]; then
-            # 明確以 UTF-8 寫入，避免中文標題（S 表格等）變成 ?
-            python -c "import os, pathlib; pathlib.Path('config.yaml').write_text(os.environ['CONFIG_YAML'], encoding='utf-8', newline='\n')"
-            echo "Wrote config.yaml from CONFIG_YAML secret (UTF-8)."
+            printf '%s\n' "$CONFIG_YAML" > config.yaml
+            echo "Wrote config.yaml from CONFIG_YAML secret."
           elif [ -f config.yaml ]; then
             echo "Using committed config.yaml."
           else
-            echo "::error::缺少 config.yaml。請設定 GitHub Secret CONFIG_YAML（完整 YAML 內容，UTF-8），或將不含密鑰的 config.yaml 提交至儲存庫。"
+            echo "::error::缺少 config.yaml。請設定 GitHub Secret CONFIG_YAML（完整 YAML 內容），或將不含密鑰的 config.yaml 提交至儲存庫。"
             exit 1
           fi
 
@@ -73,18 +61,11 @@ jobs:
 
       - name: Run sync_register.py
         env:
-          # 與 Confluence Weekly2 / guardian / cosing 相同
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
-          # To：僅主收件人（未設則用 config notify.email_to）
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SYNC_NOTIFY_EMAIL: ${{ secrets.SYNC_NOTIFY_EMAIL }}
-          # Cc：可選；未設則用 config notify.email_cc
-          SYNC_NOTIFY_CC: ${{ secrets.SYNC_NOTIFY_CC }}
-          # Graph（有設則優先於 SMTP）
-          GRAPH_TENANT_ID: ${{ secrets.GRAPH_TENANT_ID }}
-          GRAPH_CLIENT_ID: ${{ secrets.GRAPH_CLIENT_ID }}
-          GRAPH_CLIENT_SECRET: ${{ secrets.GRAPH_CLIENT_SECRET }}
-          GRAPH_MAILBOX: ${{ secrets.GRAPH_MAILBOX }}
         run: python sync_register.py
 
       - name: Upload diff artifacts

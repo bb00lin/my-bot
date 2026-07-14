@@ -1216,6 +1216,62 @@ def main() -> int:
             skip_cache_token,
         )
 
+        # 檔名改名 → 主旨縮寫過渡
+        renamed = sr.format_filename_transition(
+            "C27_VOX-QSI_Open_Issues_Register_20260702.xlsx",
+            "C27_VOX-QSI_Open_Issues_Register_20260704.xlsx",
+        )
+        check(
+            "format_filename_transition abbreviates date rename",
+            renamed == "C27...0702->C27...0704",
+            renamed,
+        )
+        same_trans = sr.format_filename_transition(
+            "C27_VOX-QSI_Open_Issues_Register_20260702.xlsx",
+            "C27_VOX-QSI_Open_Issues_Register_20260702.xlsx",
+        )
+        check(
+            "format_filename_transition same name is current stem",
+            same_trans == "C27_VOX-QSI_Open_Issues_Register_20260702",
+            same_trans,
+        )
+        first_run = sr.format_filename_transition(
+            "",
+            "C27_VOX-QSI_Open_Issues_Register_20260704.xlsx",
+        )
+        check(
+            "format_filename_transition first run no old",
+            first_run == "C27_VOX-QSI_Open_Issues_Register_20260704",
+            first_run,
+        )
+        rename_token = sr.resolve_register_subject_token(
+            "C27_VOX-QSI_Open_Issues_Register_20260704.xlsx",
+            {},
+            previous_filename="C27_VOX-QSI_Open_Issues_Register_20260702.xlsx",
+        )
+        rename_subj = sr.build_diff_email_subject(
+            subject_token=rename_token,
+            verdict="有差異",
+            stamp="2026-07-15 11:00",
+        )
+        check(
+            "diff email subject shows rename transition",
+            rename_token == "C27...0702->C27...0704"
+            and rename_subj
+            == "[C27...0702->C27...0704] 有差異 — 2026-07-15 11:00",
+            rename_subj,
+        )
+        no_prev_token = sr.resolve_register_subject_token(
+            "C27_VOX-QSI_Open_Issues_Register_20260704.xlsx",
+            {},
+            previous_filename="",
+        )
+        check(
+            "subject token without previous is full current name",
+            no_prev_token == "C27_VOX-QSI_Open_Issues_Register_20260704",
+            no_prev_token,
+        )
+
         # SMTP path with mock（預設走 smtp.gmail.com）
         import smtplib as _smtplib
 

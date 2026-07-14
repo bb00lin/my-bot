@@ -1160,6 +1160,7 @@ def deliver_diff_report(
     s_link_title: str = "",
     confluence_url: str = "",
     s_original_filename: str = "",
+    s_previous_filename: str = "",
 ) -> str:
     """同步後必做：寫入本機差異檔；GitHub Actions 另寄郵件（無差異也寄）。"""
     diff_text = print_diff_report(register_diff, dry_run=dry_run)
@@ -1177,7 +1178,11 @@ def deliver_diff_report(
     if send_mail:
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         verdict = resolve_diff_email_verdict(register_diff)
-        subject_token = resolve_register_subject_token(s_original_filename, cfg)
+        subject_token = resolve_register_subject_token(
+            s_original_filename,
+            cfg,
+            previous_filename=s_previous_filename,
+        )
         subject = build_diff_email_subject(
             subject_token=subject_token, verdict=verdict, stamp=stamp
         )
@@ -1320,11 +1325,70 @@ def sanitize_subject_token(token: str) -> str:
     return t.strip("._")
 
 
+def format_filename_transition(
+    old_name: str,
+    new_name: str,
+    *,
+    head_len: int = 3,
+    min_tail: int = 4,
+) -> str:
+    """郵件主旨用檔名過渡字串。
+
+    相同／缺舊名 → 僅目前 stem。
+    有重新命名 → 例如 ``C27...0702->C27...0704``（共用前綴縮成 head+...，差異尾段保留）。
+    """
+    old_s = sanitize_subject_token(filename_stem_for_subject(old_name))
+    new_s = sanitize_subject_token(filename_stem_for_subject(new_name))
+    if not new_s and not old_s:
+        return ""
+    if not old_s or old_s == new_s:
+        return new_s or old_s
+    if not new_s:
+        return old_s
+
+    lcp = 0
+    limit = min(len(old_s), len(new_s))
+    while lcp < limit and old_s[lcp] == new_s[lcp]:
+        lcp += 1
+
+    lcs = 0
+    max_lcs = min(len(old_s) - lcp, len(new_s) - lcp)
+    while lcs < max_lcs and old_s[-(lcs + 1)] == new_s[-(lcs + 1)]:
+        lcs += 1
+
+    old_core = old_s[lcp : len(old_s) - lcs] if lcs else old_s[lcp:]
+    new_core = new_s[lcp : len(new_s) - lcs] if lcs else new_s[lcp:]
+
+    # 差異段太短時往左併入共用前綴（0702 而非僅 2）
+    while lcp > 0 and max(len(old_core), len(new_core)) < min_tail:
+        lcp -= 1
+        old_core = old_s[lcp] + old_core
+        new_core = new_s[lcp] + new_core
+
+    suffix = old_s[len(old_s) - lcs :] if lcs else ""
+    if lcp > 0:
+        head = old_s[: min(head_len, lcp)]
+        old_part = f"{head}...{old_core}{suffix}"
+        new_part = f"{head}...{new_core}{suffix}"
+        return f"{old_part}->{new_part}"
+    return f"{old_s}->{new_s}"
+
+
+def read_cached_register_original_name(cache_dir: Path) -> str:
+    """讀取上次同步寫入的 S 表原始檔名（下載前呼叫以保留 previous）。"""
+    path = cache_dir / _REGISTER_ORIGINAL_NAME_FILE
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
+
+
 def resolve_register_subject_token(
     original_filename: str,
     cfg: dict[str, Any] | None = None,
+    *,
+    previous_filename: str = "",
 ) -> str:
-    """郵件主旨括號 token：優先真實 S 表檔名（去 .xlsx）。"""
+    """郵件主旨括號 token：優先真實 S 表檔名（去 .xlsx）；有改名則縮寫舊→新。"""
     cfg = cfg or {}
     sp = cfg.get("sharepoint") or {}
     conf = cfg.get("confluence") or {}
@@ -1335,6 +1399,7 @@ def resolve_register_subject_token(
         DEFAULT_SOURCE_LINK_TITLE,
         "Open_Issues_Register",
     )
+    current_token = ""
     for cand in candidates:
         stem = filename_stem_for_subject(str(cand))
         token = sanitize_subject_token(stem)
@@ -1344,8 +1409,17 @@ def resolve_register_subject_token(
             continue
         if "?" in token or "\ufffd" in token:
             continue
-        return token
-    return "Open_Issues_Register"
+        current_token = token
+        break
+    if not current_token:
+        current_token = "Open_Issues_Register"
+
+    prev = (previous_filename or "").strip()
+    if not prev:
+        return current_token
+    new_for_cmp = (original_filename or "").strip() or current_token
+    transition = format_filename_transition(prev, new_for_cmp)
+    return transition or current_token
 
 
 def build_diff_email_subject(
@@ -1354,7 +1428,7 @@ def build_diff_email_subject(
     verdict: str,
     stamp: str | None = None,
 ) -> str:
-    """例：[C27_VOX-QSI_Open_Issues_Register_20260702] 有差異 — 2026-07-14 11:00"""
+    """例：[C27...0702->C27...0704] 有差異 — 2026-07-15 11:00"""
     when = stamp or datetime.now().strftime("%Y-%m-%d %H:%M")
     return f"[{subject_token}] {verdict} — {when}"
 
@@ -2564,15 +2638,20 @@ def run_sync(config_path: Path, dry_run: bool) -> SyncReport:
 
     old_snapshot, snapshot_saved_at = load_last_snapshot(snapshot_path)
 
+    # 下載前讀取上次檔名，供郵件主旨顯示改名過渡（下載會覆寫 register_original_name.txt）
+    s_previous_filename = read_cached_register_original_name(cache_dir)
+
     xlsx, s_original_filename = download_sharepoint_excel(
         cfg["sharepoint"]["download_url"], cache_dir
     )
     print(f"已下載 S 表格: {xlsx} ({xlsx.stat().st_size} bytes)")
-    if s_original_filename:
-        print(
-            "郵件主旨括號: "
-            f"[{resolve_register_subject_token(s_original_filename, cfg)}]"
-        )
+    subject_preview = resolve_register_subject_token(
+        s_original_filename,
+        cfg,
+        previous_filename=s_previous_filename,
+    )
+    if subject_preview:
+        print(f"郵件主旨括號: [{subject_preview}]")
 
     s_columns, s_rows = load_register_rows_from_excel(xlsx, cfg["sharepoint"]["sheet_name"])
     print(f"S 表格欄位 ({len(s_columns)}): {', '.join(s_columns)}")
@@ -2662,6 +2741,7 @@ def run_sync(config_path: Path, dry_run: bool) -> SyncReport:
             s_link_title=source_link_title,
             confluence_url=confluence_page_url,
             s_original_filename=s_original_filename,
+            s_previous_filename=s_previous_filename,
         )
         return report
 
@@ -2698,6 +2778,7 @@ def run_sync(config_path: Path, dry_run: bool) -> SyncReport:
         s_link_title=source_link_title,
         confluence_url=confluence_page_url,
         s_original_filename=s_original_filename,
+        s_previous_filename=s_previous_filename,
     )
 
     return report

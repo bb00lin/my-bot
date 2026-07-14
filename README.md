@@ -155,9 +155,11 @@ python sync_register.py --config .\config.yaml
 - **首次執行**：無前次快照，僅列出目前 S 表格所有 ID，不視為「新增」。
 - **dry-run**：仍會產生變更紀錄，但**不更新**快照。
 - **正式同步成功後**：更新 `last_snapshot.json` 供下次比對。
-- **差異郵件主旨**：括號內使用 S 表 Excel **真實檔名**（去 `.xlsx`），例如  
-  `[C27_VOX-QSI_Open_Issues_Register_20260702] 有差異 — 2026-07-14 11:00`  
-  （優先 Content-Disposition；抓不到時退回 `sharepoint.register_filename` / 來源標題）。
+- **差異郵件主旨**：括號內使用 S 表 Excel **真實檔名**（去 `.xlsx`）。無改名時例如  
+  `[C27_VOX-QSI_Open_Issues_Register_20260702] 有差異 — 2026-07-14 11:00`；  
+  若檔名相對上次同步有變更，改顯示縮寫過渡，例如  
+  `[C27...0702->C27...0704] 有差異 — 2026-07-15 11:00`  
+  （優先 Content-Disposition；抓不到時退回 `sharepoint.register_filename` / 來源標題；上次檔名來自 `.register_cache/register_original_name.txt`）。
 
 ## 檔案說明
 
@@ -167,23 +169,13 @@ python sync_register.py --config .\config.yaml
 | `config.yaml` | 實際設定（勿提交） |
 | `config.example.yaml` | 設定範本 |
 | `.env` | API Token（勿提交） |
-| `.github/workflows/sync-register.yml` | GitHub Actions 同步 workflow |
+| `.github/workflows/sync-register.yml` | GitHub Actions 同步 workflow（僅手動觸發） |
 | `.register_cache/` | 下載的 S 表格快取與上次同步快照 |
 | `logs/` | 每次同步的變更紀錄（`sync_YYYYMMDD_HHMMSS.log`） |
 
-## GitHub Actions 遠端同步（**主要自動排程**）
+## GitHub Actions 遠端同步（手動）
 
-**建議用 GitHub Actions 做每日自動同步**（雲端執行，不必本機開機）。手動同步請到 Actions 頁面按 **Run workflow**。
-
-### 自動排程（每日 00:00 台灣時間）
-
-`.github/workflows/sync-register.yml` 已設定為**主要排程**：
-
-| 台灣時間 | cron（UTC） |
-|----------|-------------|
-| 00:00（晚上 12:00） | `0 16 * * *` |
-
-推送到 GitHub 並設好 Secrets 後即可無人值守執行。亦可手動 **Run workflow**。實際觸發可能有數分鐘延遲。
+**以 GitHub Actions 執行遠端同步**（雲端執行，不必本機開機）。同步請到 Actions 頁面按 **Run workflow**，或發 `repository_dispatch`（type: `sync-register`）。**已停用 cron 每日自動排程**，只保留手動觸發。
 
 > **為何不用 Windows 排程當主方案？** Windows 工作排程器需在設定時間**開機**（或允許喚醒）才會跑。GitHub Actions 在雲端執行，電腦關機也不影響。  
 > `scripts/install_windows_schedule.ps1` 僅作可選備援（**不必安裝**）。若已裝過 `PMWC_Sync_Register`，可保留或移除：  
@@ -212,7 +204,7 @@ S／C 表 **Status** 預期為**英文**（**大小寫不拘**）；腳本對應
 cd "D:\MEGA\Project\C27(MWF70LC1B2)\WCN7750_QCC2072\Issue"
 git init
 git add .github sync_register.py requirements.txt config.example.yaml README.md .gitignore scripts
-git commit -m "Add register sync and GitHub Actions schedule"
+git commit -m "Add register sync and GitHub Actions manual workflow"
 git remote add origin https://github.com/<OWNER>/<REPO>.git
 git push -u origin main
 ```
@@ -257,8 +249,7 @@ confluence:
 ### 啟用確認
 
 1. 開啟：`https://github.com/<OWNER>/<REPO>/actions/workflows/sync-register.yml`
-2. 先按 **Run workflow** 驗證
-3. 之後依 cron 於台灣時間每天 00:00 自動跑
+2. 按 **Run workflow** 執行同步（無 cron；僅手動／`repository_dispatch`）
 
 ### Windows 本機排程（可選備援，需開機）
 
