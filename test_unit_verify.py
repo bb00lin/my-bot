@@ -239,7 +239,7 @@ def main() -> int:
     )
     tl = sr.build_timeline_fields(row, sync_date, cfg)
     check(
-        "7. Target close 設定 timeline（起始=Opened）",
+        "7. Opened+Target close → Start+Due",
         tl == {"duedate": "2026-07-30", "customfield_10015": "2026-06-25"},
         str(tl),
     )
@@ -260,6 +260,46 @@ def main() -> int:
     check("7. 解析 7月17日", sr.parse_flexible_date("7月17日") == f"{sync_date[:4]}-07-17")
     check("7. 解析 2026年7月17日", sr.parse_flexible_date("2026年7月17日") == "2026-07-17")
 
+    # Opened only → Start only（不寫 Due、不要求 Target close）
+    row_opened_only = sr.RegisterRow(
+        register_id="RF-03",
+        opened="2026-06-01",
+        target_close="",
+    )
+    tl_opened = sr.build_timeline_fields(row_opened_only, sync_date, cfg)
+    check(
+        "7. 僅 Opened → 只設 Start",
+        tl_opened == {"customfield_10015": "2026-06-01"},
+        str(tl_opened),
+    )
+
+    # Target close only（無 Opened）→ Start=sync_date, Due=Target close
+    row_due_only = sr.RegisterRow(
+        register_id="RF-04",
+        opened="",
+        target_close="2026-08-15",
+    )
+    tl_due = sr.build_timeline_fields(row_due_only, sync_date, cfg)
+    check(
+        "7. 僅 Target close → Start=sync_date",
+        tl_due == {"customfield_10015": sync_date, "duedate": "2026-08-15"},
+        str(tl_due),
+    )
+
+    # due < start → year adjust
+    row_year = sr.RegisterRow(
+        register_id="RF-05",
+        opened="2026-11-01",
+        target_close="1/15",
+    )
+    tl_year = sr.build_timeline_fields(row_year, sync_date, cfg)
+    check(
+        "7. due < start 時順延隔年",
+        tl_year.get("customfield_10015") == "2026-11-01"
+        and tl_year.get("duedate") == "2027-01-15",
+        str(tl_year),
+    )
+
     adf = sr.text_to_adf("Register ID: RF-01")
     adf_ok = (
         adf["type"] == "doc"
@@ -274,7 +314,10 @@ def main() -> int:
 
     row_empty = sr.RegisterRow(register_id="RF-02", workstream="RF", title="No date")
 
-    check("7. Target close 空白不更新", sr.build_timeline_fields(row_empty, sync_date, cfg) == {})
+    check(
+        "7. Opened 與 Target close 皆空白不更新",
+        sr.build_timeline_fields(row_empty, sync_date, cfg) == {},
+    )
 
 
 

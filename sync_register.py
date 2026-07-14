@@ -1449,27 +1449,48 @@ def update_confluence_page(
 def build_timeline_fields(
     row: RegisterRow, sync_date: str, cfg: dict[str, Any]
 ) -> dict[str, str]:
-    """Target close 有值時，設定 Jira Timeline：起始日 = Opened，截止日 = Target close。"""
-    due = parse_flexible_date(row.target_close)
-    if not due:
-        return {}
+    """設定 Jira Timeline：Opened → 起始日；Target close → 截止日。
 
-    start = parse_flexible_date(row.opened) or sync_date
-    due_dt = datetime.strptime(due, "%Y-%m-%d")
-    start_dt = datetime.strptime(start, "%Y-%m-%d")
-    if due_dt < start_dt:
-        due_dt = due_dt.replace(year=start_dt.year + 1)
-        due = due_dt.strftime("%Y-%m-%d")
+    - Opened 有值：一律寫入 Start date（customfield_10015 / jira.start_date_field）
+    - Target close 有值：寫入 Due date；若 due < start 則把 due 調到隔年
+    - 僅 Opened、無 Target close：只寫 Start，不碰 Due
+    - 僅 Target close、無 Opened：Start 回退為 sync_date（與舊行為相容）
+    - 兩者皆空：不更新任何日期欄位（不憑空用 sync_date）
+    """
+    opened = parse_flexible_date(row.opened)
+    due = parse_flexible_date(row.target_close)
+    if not opened and not due:
+        return {}
 
     jira_cfg = cfg.get("jira", {})
     start_field = jira_cfg.get("start_date_field", "customfield_10015")
     due_field = jira_cfg.get("due_date_field", "duedate")
-    return {due_field: due, start_field: start}
+    out: dict[str, str] = {}
+
+    if opened:
+        start = opened
+        out[start_field] = start
+    else:
+        # Target-close-only：沿用舊路徑，以同步日當起始
+        start = sync_date
+        out[start_field] = start
+
+    if due:
+        due_dt = datetime.strptime(due, "%Y-%m-%d")
+        start_dt = datetime.strptime(start, "%Y-%m-%d")
+        if due_dt < start_dt:
+            due_dt = due_dt.replace(year=start_dt.year + 1)
+            due = due_dt.strftime("%Y-%m-%d")
+        out[due_field] = due
+
+    return out
 
 
 def row_has_timeline(row: RegisterRow) -> bool:
-    """Target close 有值（會寫入起訖日）即視為有時間軸。"""
-    return bool(parse_flexible_date(row.target_close))
+    """Opened 或 Target close 有可解析日期（會寫入 Start／Due）即視為有時間軸。"""
+    return bool(
+        parse_flexible_date(row.opened) or parse_flexible_date(row.target_close)
+    )
 
 
 def timeline_rank_group(row: RegisterRow) -> int:
