@@ -44,16 +44,17 @@ Jira PMWC（P1/P2/P3… 大型工作底下的任務）
 
 | S 表欄位 | Jira 欄位 | 規則 |
 |----------|-----------|------|
-| **Opened** | Start date（`customfield_10015`） | 可解析時**一律**寫入起始日 |
-| **Target close** | Due date（`duedate`） | 可解析時寫入到期日；若 due < start，到期日順延至隔年 |
+| **Opened** | Start date（`customfield_10015` / `jira.start_date_field`） | 可解析即寫入起始日（不需 Target close） |
+| **Target close** | Due date（`duedate` / `jira.due_date_field`） | 可解析即寫入到期日；兩者皆有且 due < start 時順延至隔年 |
 
 補充：
 
-- 僅有 Opened、無 Target close：只更新 Start，**不清除**既有 Due
-- 僅有 Target close、無 Opened：Start 回退為**同步執行當天**（相容舊行為）
-- Opened 與 Target close 皆空：不更新任何日期欄位
+- 僅有 Opened：只更新 Start，**不清除**既有 Due
+- 僅有 Target close：只更新 Due，**不以同步日填 Start**
+- 兩者皆有：同時寫入 Start + Due（due < start → due 年 +1）
+- 兩者皆空：不更新任何日期欄位
 
-支援日期格式：`2026-07-30`、`7/30`、`7/30/2026`、`7月17日`、Excel 序號等。
+支援日期格式：`2026-07-30`、`7/30`、`7/30/2026`、`7/30/26`、`7月31日`、`2026年7月31日`、Excel 序號等。
 
 可在 `config.yaml` 的 `jira.start_date_field` / `jira.due_date_field` 調整。
 
@@ -151,6 +152,9 @@ python sync_register.py --config .\config.yaml
 - **首次執行**：無前次快照，僅列出目前 S 表格所有 ID，不視為「新增」。
 - **dry-run**：仍會產生變更紀錄，但**不更新**快照。
 - **正式同步成功後**：更新 `last_snapshot.json` 供下次比對。
+- **差異郵件主旨**：括號內使用 S 表 Excel **真實檔名**（去 `.xlsx`），例如  
+  `[C27_VOX-QSI_Open_Issues_Register_20260702] 有差異 — 2026-07-14 11:00`  
+  （優先 Content-Disposition；抓不到時退回 `sharepoint.register_filename` / 來源標題）。
 
 ## 檔案說明
 

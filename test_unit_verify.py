@@ -16,6 +16,8 @@ import sys
 
 import tempfile
 
+from datetime import datetime
+
 from pathlib import Path
 
 
@@ -257,7 +259,42 @@ def main() -> int:
         str(tl_cn),
     )
 
-    check("7. 解析 7月17日", sr.parse_flexible_date("7月17日") == f"{sync_date[:4]}-07-17")
+    year = datetime.now().year
+    parse_cases = [
+        ("7月31日", f"{year}-07-31"),
+        ("7 月 31 日", f"{year}-07-31"),
+        ("2026年7月31日", "2026-07-31"),
+        ("2026年07月31号", "2026-07-31"),
+        ("7/31/2026", "2026-07-31"),
+        ("7/31/26", "2026-07-31"),
+        ("7/31", f"{year}-07-31"),
+        ("2026-07-31", "2026-07-31"),
+        ("2026.07.31", "2026-07-31"),
+        ("2026-07-31 00:00:00", "2026-07-31"),
+        ("2026-07-31T12:00:00Z", "2026-07-31"),
+        ("31-Jul-2026", "2026-07-31"),
+        ("Jul 31, 2026", "2026-07-31"),
+    ]
+    parse_ok = True
+    for raw, expect in parse_cases:
+        got = sr.parse_flexible_date(raw)
+        if got != expect:
+            parse_ok = False
+            print(f"       parse fail: {raw!r} -> {got!r} (期望 {expect!r})")
+    # Excel serial: 2026-07-31 ≈ 46204 (1899-12-30 epoch)
+    serial = (datetime(2026, 7, 31) - datetime(1899, 12, 30)).days
+    if sr.parse_flexible_date(serial) != "2026-07-31":
+        parse_ok = False
+        print(f"       parse fail: serial {serial} -> {sr.parse_flexible_date(serial)!r}")
+    if sr.parse_flexible_date(str(serial)) != "2026-07-31":
+        parse_ok = False
+        print(f"       parse fail: serial str -> {sr.parse_flexible_date(str(serial))!r}")
+    if sr.parse_flexible_date("7") is not None:
+        parse_ok = False
+        print("       parse fail: '7' should not be Excel serial")
+    check("7. parse_flexible_date 中文/斜線/ISO/序號", parse_ok)
+
+    check("7. 解析 7月17日", sr.parse_flexible_date("7月17日") == f"{year}-07-17")
     check("7. 解析 2026年7月17日", sr.parse_flexible_date("2026年7月17日") == "2026-07-17")
 
     # Opened only → Start only（不寫 Due、不要求 Target close）
@@ -273,7 +310,7 @@ def main() -> int:
         str(tl_opened),
     )
 
-    # Target close only（無 Opened）→ Start=sync_date, Due=Target close
+    # Target close only（無 Opened）→ 只設 Due（不填 Start）
     row_due_only = sr.RegisterRow(
         register_id="RF-04",
         opened="",
@@ -281,9 +318,25 @@ def main() -> int:
     )
     tl_due = sr.build_timeline_fields(row_due_only, sync_date, cfg)
     check(
-        "7. 僅 Target close → Start=sync_date",
-        tl_due == {"customfield_10015": sync_date, "duedate": "2026-08-15"},
+        "7. 僅 Target close → 只設 Due",
+        tl_due == {"duedate": "2026-08-15"},
         str(tl_due),
+    )
+
+    # Opened 中文 + Target close 斜線
+    row_mixed = sr.RegisterRow(
+        register_id="RF-06",
+        opened="6月25日",
+        target_close="7/31/26",
+    )
+    tl_mixed = sr.build_timeline_fields(row_mixed, sync_date, cfg)
+    check(
+        "7. Opened 中文 + Target close 斜線",
+        tl_mixed == {
+            "customfield_10015": f"{year}-06-25",
+            "duedate": "2026-07-31",
+        },
+        str(tl_mixed),
     )
 
     # due < start → year adjust
@@ -852,6 +905,58 @@ def main() -> int:
             str(payload)[:200],
         )
 
+        # 郵件主旨 [bracket] = S 表檔名（非 PMWC Sync）
+        cd_plain = sr.parse_content_disposition_filename(
+            'attachment; filename="C27_VOX-QSI_Open_Issues_Register_20260702.xlsx"'
+        )
+        cd_star = sr.parse_content_disposition_filename(
+            "attachment; filename*=UTF-8''C27_VOX-QSI_Open_Issues_Register_20260702.xlsx"
+        )
+        check(
+            "Content-Disposition filename= / filename*",
+            cd_plain == "C27_VOX-QSI_Open_Issues_Register_20260702.xlsx"
+            and cd_star == "C27_VOX-QSI_Open_Issues_Register_20260702.xlsx",
+            f"plain={cd_plain!r} star={cd_star!r}",
+        )
+        token = sr.resolve_register_subject_token(
+            "C27_VOX-QSI_Open_Issues_Register_20260702.xlsx", {}
+        )
+        subj = sr.build_diff_email_subject(
+            subject_token=token,
+            verdict="有差異",
+            stamp="2026-07-14 11:00",
+        )
+        check(
+            "diff email subject uses S filename bracket",
+            token == "C27_VOX-QSI_Open_Issues_Register_20260702"
+            and subj
+            == "[C27_VOX-QSI_Open_Issues_Register_20260702] 有差異 — 2026-07-14 11:00"
+            and "PMWC Sync" not in subj,
+            subj,
+        )
+        fallback_token = sr.resolve_register_subject_token(
+            "",
+            {
+                "sharepoint": {
+                    "register_filename": "C27_VOX-QSI_Open_Issues_Register_20260702.xlsx"
+                }
+            },
+        )
+        check(
+            "subject token falls back to sharepoint.register_filename",
+            fallback_token == "C27_VOX-QSI_Open_Issues_Register_20260702",
+            fallback_token,
+        )
+        skip_cache_token = sr.resolve_register_subject_token(
+            "register_latest.xlsx",
+            {"confluence": {"source_link_title": "C27 Open Issues Register (S 表格)"}},
+        )
+        check(
+            "subject token skips register_latest cache name",
+            skip_cache_token == "C27_Open_Issues_Register_(S_表格)",
+            skip_cache_token,
+        )
+
         # SMTP path with mock（預設走 smtp.gmail.com）
         import smtplib as _smtplib
 
@@ -937,17 +1042,28 @@ def main() -> int:
 
         cache = SCRIPT_DIR / ".register_cache"
 
-        xlsx = sr.download_sharepoint_excel(url, cache)
+        xlsx, original_name = sr.download_sharepoint_excel(url, cache)
 
         s_columns, s_rows = sr.load_register_rows_from_excel(xlsx, sheet)
         ids_s = [r.register_id for r in s_rows]
         print(f"  下載成功: {xlsx.name} ({xlsx.stat().st_size} bytes)")
+        if original_name:
+            print(f"  原始檔名: {original_name}")
+            print(
+                "  主旨括號: "
+                f"[{sr.resolve_register_subject_token(original_name, example_cfg)}]"
+            )
         print(f"  S 欄位: {s_columns}")
         print(f"  S 有效列數: {len(s_rows)}")
 
         print(f"  前 5 個 ID: {ids_s[:5]}")
 
         check("Excel 下載與解析", len(s_rows) > 0, f"{len(s_rows)} 列")
+        check(
+            "download_sharepoint_excel 回傳 (path, original_name)",
+            isinstance(original_name, str),
+            repr(original_name),
+        )
 
 
 

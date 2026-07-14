@@ -28,6 +28,8 @@ sharepoint:
   # Confluence 頁首 S 表連結：瀏覽器開啟網頁版（由 share token 轉成 :x:/g/personal/... 形式）
   view_url: "https://qsitw-my.sharepoint.com/:x:/g/personal/challo_chen_qsitw_com/IQAyqQjNe2bmSp28QrFpnf_sAbL5gqBzp6h3RSCwPKx2cbY"
   sheet_name: "Register"
+  # 可選：若下載 header 抓不到檔名，郵件主旨 [bracket] 可退回此值（含或不含 .xlsx）
+  # register_filename: "C27_VOX-QSI_Open_Issues_Register_20260702.xlsx"
 
 confluence:
   page_id: "189300768"

@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import requests
 import yaml
@@ -76,6 +77,7 @@ S_COLUMN_ATTR: dict[str, str] = {
 DONE_STATUS_KEYWORDS: tuple[str, ...] = ("done", "closed", "completed")
 JIRA_DONE_STATUS = "完成"
 DEFAULT_JIRA_STATUS = "待辦事項"
+DEFAULT_SOURCE_LINK_TITLE = "C27 Open Issues Register (S 表格)"
 
 # Team-managed Jira：畫面類型名與 JQL 可用名不一致（例：顯示「任務」但 JQL 需 Task；
 # 「大型工作」反而要用中文）。搜尋時依序嘗試。
@@ -260,6 +262,7 @@ def _excel_serial_to_datetime(value: float) -> datetime:
 def parse_flexible_date(value: Any, *, default_year: int | None = None) -> str | None:
     """將各種日期格式轉為 YYYY-MM-DD；無法解析則回傳 None。
 
+    支援：ISO、斜線/橫線、中文年月日、英文月份、Excel 序號、帶時間字串等。
     無年份的格式（如 7月17日、7/17）以 default_year 或當年度補齊。
     """
     if value is None or value == "":
@@ -269,16 +272,35 @@ def parse_flexible_date(value: Any, *, default_year: int | None = None) -> str |
     if isinstance(value, (int, float)):
         return _excel_serial_to_datetime(float(value)).strftime("%Y-%m-%d")
 
-    text = str(value).strip()
+    text = str(value).strip().replace("\u3000", " ")
     if not text:
         return None
-    if re.fullmatch(r"\d+(\.\d+)?", text):
-        return _excel_serial_to_datetime(float(text)).strftime("%Y-%m-%d")
 
     year_default = default_year if default_year is not None else datetime.now().year
 
-    # 2026年7月17日 / 2026年07月17号
-    m = re.fullmatch(r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})[日号]?", text)
+    # Excel serial（純數字字串）；短整數（如 "7"）不當序號，避免誤判
+    if re.fullmatch(r"\d+(\.\d+)?", text):
+        num = float(text)
+        if "." in text or num >= 1000:
+            try:
+                return _excel_serial_to_datetime(num).strftime("%Y-%m-%d")
+            except (OverflowError, ValueError):
+                return None
+
+    # 僅對 ISO／數字年月日後綴的時間裁切，避免弄壞「7 月 31 日」「Jul 31, 2026」
+    m_iso_time = re.fullmatch(
+        r"(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})(?:[ T]\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?)?",
+        text,
+    )
+    text_date = m_iso_time.group(1) if m_iso_time else text
+    if not text_date:
+        return None
+
+    # 2026年7月17日 / 2026 年 07 月 17 号
+    m = re.fullmatch(
+        r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]?",
+        text_date,
+    )
     if m:
         try:
             return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).strftime(
@@ -287,8 +309,8 @@ def parse_flexible_date(value: Any, *, default_year: int | None = None) -> str |
         except ValueError:
             return None
 
-    # 7月17日 / 07月17号（無年份）
-    m = re.fullmatch(r"(\d{1,2})月\s*(\d{1,2})[日号]?", text)
+    # 7月17日 / 7 月 31 日 / 07月17号（無年份 → 當年度）
+    m = re.fullmatch(r"(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]?", text_date)
     if m:
         try:
             return datetime(year_default, int(m.group(1)), int(m.group(2))).strftime(
@@ -297,9 +319,22 @@ def parse_flexible_date(value: Any, *, default_year: int | None = None) -> str |
         except ValueError:
             return None
 
-    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%m/%d/%y", "%m/%d", "%m-%d-%Y", "%m-%d"):
+    for fmt in (
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%Y.%m.%d",
+        "%m/%d/%Y",
+        "%m/%d/%y",
+        "%m/%d",
+        "%m-%d-%Y",
+        "%m-%d-%y",
+        "%m-%d",
+        "%d-%b-%Y",
+        "%b %d, %Y",
+        "%b %d %Y",
+    ):
         try:
-            parsed = datetime.strptime(text, fmt)
+            parsed = datetime.strptime(text_date, fmt)
             if fmt in ("%m/%d", "%m-%d"):
                 parsed = parsed.replace(year=year_default)
             return parsed.strftime("%Y-%m-%d")
@@ -910,6 +945,7 @@ def deliver_diff_report(
     s_link_url: str = "",
     s_link_title: str = "",
     confluence_url: str = "",
+    s_original_filename: str = "",
 ) -> str:
     """同步後必做：寫入本機差異檔；GitHub Actions 另寄郵件（無差異也寄）。"""
     diff_text = print_diff_report(register_diff, dry_run=dry_run)
@@ -932,7 +968,10 @@ def deliver_diff_report(
             verdict = "有差異"
         else:
             verdict = "無差異"
-        subject = f"[PMWC Sync] {verdict} — {stamp}"
+        subject_token = resolve_register_subject_token(s_original_filename, cfg)
+        subject = build_diff_email_subject(
+            subject_token=subject_token, verdict=verdict, stamp=stamp
+        )
         body = build_diff_email_body(
             diff_text,
             report,
@@ -991,16 +1030,146 @@ def print_diff_report(diff: RegisterDiff, *, dry_run: bool = False) -> str:
 # SharePoint / Excel
 # ---------------------------------------------------------------------------
 
+_REGISTER_CACHE_NAME = "register_latest.xlsx"
+_REGISTER_ORIGINAL_NAME_FILE = "register_original_name.txt"
+_EXCEL_SUFFIXES = (".xlsx", ".xls", ".xlsm")
 
-def download_sharepoint_excel(url: str, cache_dir: Path) -> Path:
+
+def parse_content_disposition_filename(header: str) -> str | None:
+    """從 Content-Disposition 取出 basename（優先 filename*）。"""
+    if not (header or "").strip():
+        return None
+    # RFC 5987：filename*=UTF-8''percent-encoded
+    m_star = re.search(r"filename\*\s*=\s*([^;]+)", header, flags=re.IGNORECASE)
+    if m_star:
+        raw = m_star.group(1).strip().strip('"').strip("'")
+        if "'" in raw:
+            parts = raw.split("'", 2)
+            if len(parts) == 3:
+                raw = parts[2]
+        name = unquote(raw).strip().strip('"').strip("'")
+        if name:
+            return Path(name).name
+    m = re.search(r"filename\s*=\s*([^;]+)", header, flags=re.IGNORECASE)
+    if m:
+        raw = m.group(1).strip().strip('"').strip("'")
+        if raw.lower().startswith("utf-8''"):
+            raw = unquote(raw[7:])
+        name = raw.strip()
+        if name:
+            return Path(name).name
+    return None
+
+
+def filename_from_download_url(url: str) -> str | None:
+    """若 URL path 以 .xlsx/.xls/.xlsm 結尾則取 basename。"""
+    path = unquote(urlparse(url or "").path or "")
+    name = Path(path).name
+    if name and name.lower().endswith(_EXCEL_SUFFIXES):
+        return name
+    return None
+
+
+def extract_download_original_filename(
+    resp: requests.Response, request_url: str
+) -> str:
+    """Prefer Content-Disposition，其次最終／請求 URL 的 .xlsx 檔名。"""
+    header = resp.headers.get("Content-Disposition") or resp.headers.get(
+        "content-disposition"
+    )
+    for candidate in (
+        parse_content_disposition_filename(header or ""),
+        filename_from_download_url(str(resp.url or "")),
+        filename_from_download_url(request_url),
+    ):
+        if candidate and candidate.lower() != _REGISTER_CACHE_NAME:
+            return candidate
+    return ""
+
+
+def filename_stem_for_subject(name: str) -> str:
+    """去掉路徑與 Excel 副檔名，供郵件主旨 [bracket] 使用。"""
+    base = Path((name or "").strip()).name
+    if not base:
+        return ""
+    lower = base.lower()
+    for ext in _EXCEL_SUFFIXES:
+        if lower.endswith(ext):
+            return base[: -len(ext)]
+    return base
+
+
+def sanitize_subject_token(token: str) -> str:
+    """清理括號內字元；空白改底線。"""
+    t = (token or "").strip()
+    t = re.sub(r'[\r\n\[\]<>:"/\\|?*]', "", t)
+    t = re.sub(r"\s+", "_", t)
+    return t.strip("._")
+
+
+def resolve_register_subject_token(
+    original_filename: str,
+    cfg: dict[str, Any] | None = None,
+) -> str:
+    """郵件主旨括號 token：優先真實 S 表檔名（去 .xlsx）。"""
+    cfg = cfg or {}
+    sp = cfg.get("sharepoint") or {}
+    conf = cfg.get("confluence") or {}
+    candidates = (
+        original_filename,
+        str(sp.get("register_filename") or ""),
+        str(conf.get("source_link_title") or ""),
+        DEFAULT_SOURCE_LINK_TITLE,
+        "Open_Issues_Register",
+    )
+    for cand in candidates:
+        stem = filename_stem_for_subject(str(cand))
+        token = sanitize_subject_token(stem)
+        if not token:
+            continue
+        if token.lower() == "register_latest":
+            continue
+        if "?" in token or "\ufffd" in token:
+            continue
+        return token
+    return "Open_Issues_Register"
+
+
+def build_diff_email_subject(
+    *,
+    subject_token: str,
+    verdict: str,
+    stamp: str | None = None,
+) -> str:
+    """例：[C27_VOX-QSI_Open_Issues_Register_20260702] 有差異 — 2026-07-14 11:00"""
+    when = stamp or datetime.now().strftime("%Y-%m-%d %H:%M")
+    return f"[{subject_token}] {verdict} — {when}"
+
+
+def download_sharepoint_excel(url: str, cache_dir: Path) -> tuple[Path, str]:
+    """下載至 register_latest.xlsx；回傳 (path, 原始檔名 basename)。
+
+    原始檔名優先取自 Content-Disposition（filename / filename*），否則 URL。
+    同時寫入 cache_dir/register_original_name.txt（若有解析到）。
+    """
     cache_dir.mkdir(parents=True, exist_ok=True)
-    dest = cache_dir / "register_latest.xlsx"
+    dest = cache_dir / _REGISTER_CACHE_NAME
     resp = requests.get(url, timeout=120, allow_redirects=True)
     resp.raise_for_status()
     if len(resp.content) < 1000:
         raise RuntimeError("下載的檔案過小，可能不是有效的 xlsx。")
     dest.write_bytes(resp.content)
-    return dest
+    original = extract_download_original_filename(resp, url)
+    name_file = cache_dir / _REGISTER_ORIGINAL_NAME_FILE
+    if original:
+        name_file.write_text(original, encoding="utf-8")
+        print(f"S 表原始檔名: {original}")
+    elif name_file.is_file():
+        cached = name_file.read_text(encoding="utf-8").strip()
+        if cached:
+            original = cached
+            print(f"S 表原始檔名（快取）: {original}")
+    return dest, original
 
 
 def _cell_column_letter(cell: Any) -> str | None:
@@ -1335,9 +1504,6 @@ def build_confluence_html_table(
 
 
 # CONFIG_YAML 若在 Windows 以錯誤編碼寫入 secret，中文會變成 ?；以腳本內 UTF-8 預設救回。
-DEFAULT_SOURCE_LINK_TITLE = "C27 Open Issues Register (S 表格)"
-
-
 def _title_looks_corrupted(text: str) -> bool:
     """偵測編碼損壞（中文變 ? 或 U+FFFD）。合法標題不應含 ASCII ?。"""
     t = (text or "").strip()
@@ -1451,12 +1617,16 @@ def build_timeline_fields(
 ) -> dict[str, str]:
     """設定 Jira Timeline：Opened → 起始日；Target close → 截止日。
 
-    - Opened 有值：一律寫入 Start date（customfield_10015 / jira.start_date_field）
-    - Target close 有值：寫入 Due date；若 due < start 則把 due 調到隔年
-    - 僅 Opened、無 Target close：只寫 Start，不碰 Due
-    - 僅 Target close、無 Opened：Start 回退為 sync_date（與舊行為相容）
-    - 兩者皆空：不更新任何日期欄位（不憑空用 sync_date）
+    - Opened 有值：寫入 Start date（customfield_10015 / jira.start_date_field）
+    - Target close 有值：寫入 Due date（duedate / jira.due_date_field）
+    - 兩者皆有：兩者都寫；若 due < start 則把 due 順延至隔年
+    - 僅 Opened：只寫 Start，不碰 Due（不需 Target close）
+    - 僅 Target close：只寫 Due，不以 sync_date 填 Start
+    - 兩者皆空：不更新任何日期欄位
+
+    sync_date 保留供呼叫端相容；目前不再用於回填 Start。
     """
+    del sync_date  # 保留參數簽名；日期僅依 Opened / Target close
     opened = parse_flexible_date(row.opened)
     due = parse_flexible_date(row.target_close)
     if not opened and not due:
@@ -1468,19 +1638,15 @@ def build_timeline_fields(
     out: dict[str, str] = {}
 
     if opened:
-        start = opened
-        out[start_field] = start
-    else:
-        # Target-close-only：沿用舊路徑，以同步日當起始
-        start = sync_date
-        out[start_field] = start
+        out[start_field] = opened
 
     if due:
-        due_dt = datetime.strptime(due, "%Y-%m-%d")
-        start_dt = datetime.strptime(start, "%Y-%m-%d")
-        if due_dt < start_dt:
-            due_dt = due_dt.replace(year=start_dt.year + 1)
-            due = due_dt.strftime("%Y-%m-%d")
+        if opened:
+            due_dt = datetime.strptime(due, "%Y-%m-%d")
+            start_dt = datetime.strptime(opened, "%Y-%m-%d")
+            if due_dt < start_dt:
+                due_dt = due_dt.replace(year=start_dt.year + 1)
+                due = due_dt.strftime("%Y-%m-%d")
         out[due_field] = due
 
     return out
@@ -2119,8 +2285,15 @@ def run_sync(config_path: Path, dry_run: bool) -> SyncReport:
 
     old_snapshot, snapshot_saved_at = load_last_snapshot(snapshot_path)
 
-    xlsx = download_sharepoint_excel(cfg["sharepoint"]["download_url"], cache_dir)
+    xlsx, s_original_filename = download_sharepoint_excel(
+        cfg["sharepoint"]["download_url"], cache_dir
+    )
     print(f"已下載 S 表格: {xlsx} ({xlsx.stat().st_size} bytes)")
+    if s_original_filename:
+        print(
+            "郵件主旨括號: "
+            f"[{resolve_register_subject_token(s_original_filename, cfg)}]"
+        )
 
     s_columns, s_rows = load_register_rows_from_excel(xlsx, cfg["sharepoint"]["sheet_name"])
     print(f"S 表格欄位 ({len(s_columns)}): {', '.join(s_columns)}")
@@ -2156,7 +2329,7 @@ def run_sync(config_path: Path, dry_run: bool) -> SyncReport:
     print(f"Jira Web 連結目標: {web_link_title} ({confluence_page_url})")
 
     sync_date = datetime.now().strftime("%Y-%m-%d")
-    print(f"同步執行日（無 Opened 時的 fallback）: {sync_date}")
+    print(f"同步執行日: {sync_date}")
 
     id_to_key = sync_jira_for_rows(
         client,
@@ -2209,6 +2382,7 @@ def run_sync(config_path: Path, dry_run: bool) -> SyncReport:
             s_link_url=source_link_url,
             s_link_title=source_link_title,
             confluence_url=confluence_page_url,
+            s_original_filename=s_original_filename,
         )
         return report
 
@@ -2244,6 +2418,7 @@ def run_sync(config_path: Path, dry_run: bool) -> SyncReport:
         s_link_url=source_link_url,
         s_link_title=source_link_title,
         confluence_url=confluence_page_url,
+        s_original_filename=s_original_filename,
     )
 
     return report
