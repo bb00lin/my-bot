@@ -658,6 +658,15 @@ def diff_has_changes(diff: RegisterDiff) -> bool:
     )
 
 
+def resolve_diff_email_verdict(diff: RegisterDiff) -> str:
+    """郵件主旨／內文第一行結論：首次快照 | 有差異 | 無差異。"""
+    if diff.is_first_run:
+        return "首次快照"
+    if diff_has_changes(diff):
+        return "有差異"
+    return "無差異"
+
+
 def write_sync_log(
     log_dir: Path,
     diff: RegisterDiff,
@@ -697,16 +706,24 @@ def build_diff_email_body(
     diff_text: str,
     report: SyncReport,
     *,
+    verdict: str = "",
     s_link_url: str = "",
     s_link_title: str = "",
     confluence_url: str = "",
 ) -> str:
-    lines = [
-        "PMWC Register 同步差異報告",
-        f"時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"執行環境: {'GitHub Actions' if is_github_actions() else '本機'}",
-        "",
-    ]
+    """純文字郵件內文。第一行為【有差異】／【無差異】／【首次快照】。"""
+    lines: list[str] = []
+    if verdict:
+        lines.append(f"【{verdict}】")
+        lines.append("")
+    lines.extend(
+        [
+            "PMWC Register 同步差異報告",
+            f"時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"執行環境: {'GitHub Actions' if is_github_actions() else '本機'}",
+            "",
+        ]
+    )
     if s_link_url:
         lines.append(f"S 表格連結: {s_link_title or 'SharePoint Register'}")
         lines.append(s_link_url)
@@ -718,6 +735,44 @@ def build_diff_email_body(
     lines.append("")
     lines.append(_format_sync_result_section(report))
     return "\n".join(lines)
+
+
+def build_diff_email_html_body(plain_body: str, *, verdict: str) -> str:
+    """HTML 內文：有差異時第一行紅色粗體；其餘以 escaped <pre> 呈現。"""
+    if verdict == "有差異":
+        banner = (
+            '<div style="font-size:1.25em;margin:0 0 12px 0">'
+            '<span style="color:red;font-weight:bold">有差異</span>'
+            "</div>"
+        )
+    elif verdict:
+        banner = (
+            '<div style="font-size:1.25em;font-weight:bold;margin:0 0 12px 0">'
+            f"{html.escape(verdict)}"
+            "</div>"
+        )
+    else:
+        banner = ""
+
+    rest = plain_body
+    if verdict:
+        # 略過純文字第一行 【verdict】與緊接空行，避免 HTML 重複標題
+        lines = plain_body.splitlines()
+        if lines and lines[0].strip() in {f"【{verdict}】", verdict}:
+            lines = lines[1:]
+            if lines and lines[0].strip() == "":
+                lines = lines[1:]
+        rest = "\n".join(lines)
+
+    escaped = html.escape(rest)
+    return (
+        "<!DOCTYPE html><html><body "
+        'style="font-family:Segoe UI,Arial,sans-serif;font-size:14px">'
+        f"{banner}"
+        '<pre style="white-space:pre-wrap;font-family:Consolas,monospace;'
+        f'font-size:13px;margin:0">{escaped}</pre>'
+        "</body></html>"
+    )
 
 
 def _email_domain(addr: str) -> str:
@@ -785,12 +840,22 @@ def build_graph_send_mail_payload(
     body: str,
     to_addr: str,
     save_to_sent: bool = False,
+    html_body: str | None = None,
 ) -> dict[str, Any]:
-    """組 Microsoft Graph users/.../sendMail JSON（供單元測試 mock）。"""
+    """組 Microsoft Graph users/.../sendMail JSON（供單元測試 mock）。
+
+    有 html_body 時以 HTML 寄出（紅色「有差異」等）；否則 Text。
+    """
+    if html_body:
+        content_type = "HTML"
+        content = html_body
+    else:
+        content_type = "Text"
+        content = body
     return {
         "message": {
             "subject": subject,
-            "body": {"contentType": "Text", "content": body},
+            "body": {"contentType": content_type, "content": content},
             "toRecipients": [
                 {"emailAddress": {"address": to_addr}},
             ],
@@ -836,6 +901,7 @@ def send_diff_email_graph(
     *,
     subject: str,
     body: str,
+    html_body: str | None = None,
 ) -> None:
     """以 Microsoft Graph sendMail 寄信（需 Mail.Send application permission）。"""
     notify = cfg.get("notify") or {}
@@ -888,7 +954,7 @@ def send_diff_email_graph(
         tenant=tenant, client_id=client_id, client_secret=client_secret
     )
     payload = build_graph_send_mail_payload(
-        subject=subject, body=body, to_addr=to_addr
+        subject=subject, body=body, to_addr=to_addr, html_body=html_body
     )
     url = (
         "https://graph.microsoft.com/v1.0/users/"
@@ -914,13 +980,15 @@ def send_diff_email_smtp(
     *,
     subject: str,
     body: str,
+    html_body: str | None = None,
 ) -> None:
     """透過 SMTP 寄出差異報告（GitHub Secrets: MAIL_USERNAME / MAIL_PASSWORD）。
 
     主機推斷：明確 SMTP_HOST / notify.smtp_host 優先；否則依 MAIL_USERNAME 網域
-   （gmail → smtp.gmail.com；其餘預設 smtp.office365.com）。
+    （gmail → smtp.gmail.com；其餘預設 smtp.office365.com）。
     my-bot 內 guardian_bot / DailyStockPush 使用同一組 MAIL_* + smtp.gmail.com。
     From 固定為 MAIL_USERNAME。
+    有 html_body 時以 multipart/alternative（text + html）寄出。
     """
     notify = cfg.get("notify") or {}
     to_addr = (
@@ -964,6 +1032,8 @@ def send_diff_email_smtp(
     msg["From"] = from_addr
     msg["To"] = to_addr
     msg.set_content(body)
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
 
     try:
         with smtplib.SMTP(host, port, timeout=60) as smtp:
@@ -1005,14 +1075,19 @@ def send_diff_email(
     *,
     subject: str,
     body: str,
+    html_body: str | None = None,
 ) -> None:
     """依 notify.mail_backend（auto|smtp|graph）寄出差異報告。"""
     backend = resolve_mail_backend(cfg)
     print(f"郵件後端: {backend}")
     if backend == "graph":
-        send_diff_email_graph(cfg, subject=subject, body=body)
+        send_diff_email_graph(
+            cfg, subject=subject, body=body, html_body=html_body
+        )
     else:
-        send_diff_email_smtp(cfg, subject=subject, body=body)
+        send_diff_email_smtp(
+            cfg, subject=subject, body=body, html_body=html_body
+        )
 
 
 def deliver_diff_report(
@@ -1042,12 +1117,7 @@ def deliver_diff_report(
 
     if send_mail:
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        if register_diff.is_first_run:
-            verdict = "首次快照"
-        elif diff_has_changes(register_diff):
-            verdict = "有差異"
-        else:
-            verdict = "無差異"
+        verdict = resolve_diff_email_verdict(register_diff)
         subject_token = resolve_register_subject_token(s_original_filename, cfg)
         subject = build_diff_email_subject(
             subject_token=subject_token, verdict=verdict, stamp=stamp
@@ -1055,12 +1125,16 @@ def deliver_diff_report(
         body = build_diff_email_body(
             diff_text,
             report,
+            verdict=verdict,
             s_link_url=s_link_url,
             s_link_title=s_link_title,
             confluence_url=confluence_url,
         )
+        html_body = build_diff_email_html_body(body, verdict=verdict)
         try:
-            send_diff_email(cfg, subject=subject, body=body)
+            send_diff_email(
+                cfg, subject=subject, body=body, html_body=html_body
+            )
             print(f"差異報告已寄出: {subject}")
         except Exception as exc:  # noqa: BLE001
             report.errors.append(f"寄送差異郵件: {exc}")

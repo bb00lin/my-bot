@@ -1000,6 +1000,7 @@ def main() -> int:
     email_body = sr.build_diff_email_body(
         empty_report_text,
         sr.SyncReport(),
+        verdict="無差異",
         s_link_url="https://example.com/register.xlsx",
         s_link_title="SharePoint Register",
         confluence_url="https://confluence.example/page",
@@ -1009,6 +1010,51 @@ def main() -> int:
         "https://example.com/register.xlsx" in email_body
         and "SharePoint Register" in email_body,
         email_body[:200],
+    )
+    check(
+        "Diff email body first line 無差異",
+        email_body.startswith("【無差異】"),
+        email_body.splitlines()[0] if email_body else "",
+    )
+    email_changed = sr.build_diff_email_body(
+        "========== S 表格變更摘要 ==========\n【新增】1 筆",
+        sr.SyncReport(),
+        verdict="有差異",
+    )
+    html_changed = sr.build_diff_email_html_body(email_changed, verdict="有差異")
+    check(
+        "Diff email plain first line 有差異",
+        email_changed.startswith("【有差異】"),
+        email_changed.splitlines()[0],
+    )
+    check(
+        "Diff email HTML first line red 有差異",
+        'style="color:red;font-weight:bold">有差異</span>' in html_changed
+        and "【有差異】" not in html_changed.split("<pre", 1)[0],
+        html_changed[:280],
+    )
+    email_first = sr.build_diff_email_body("snap", sr.SyncReport(), verdict="首次快照")
+    html_first = sr.build_diff_email_html_body(email_first, verdict="首次快照")
+    check(
+        "Diff email first-run plain 首次快照",
+        email_first.startswith("【首次快照】"),
+        email_first.splitlines()[0],
+    )
+    check(
+        "Diff email first-run HTML not red 有差異",
+        "首次快照" in html_first
+        and "color:red" not in html_first
+        and "有差異" not in html_first.split("<pre", 1)[0],
+        html_first[:280],
+    )
+    first_diff = sr.RegisterDiff(is_first_run=True, added_ids=["A-1"])
+    none_diff = sr.RegisterDiff(is_first_run=False)
+    changed_diff = sr.RegisterDiff(is_first_run=False, added_ids=["B-1"])
+    check(
+        "resolve_diff_email_verdict mapping",
+        sr.resolve_diff_email_verdict(first_diff) == "首次快照"
+        and sr.resolve_diff_email_verdict(none_diff) == "無差異"
+        and sr.resolve_diff_email_verdict(changed_diff) == "有差異",
     )
 
     # 11c. Mail backend selection / Graph payload / SMTP host inference
@@ -1071,6 +1117,18 @@ def main() -> int:
             == "bob.lin@qsitw.com"
             and payload.get("saveToSentItems") is False,
             str(payload)[:200],
+        )
+        payload_html = sr.build_graph_send_mail_payload(
+            subject="Subj",
+            body="【有差異】\nplain",
+            to_addr="bob.lin@qsitw.com",
+            html_body='<span style="color:red;font-weight:bold">有差異</span>',
+        )
+        check(
+            "Graph sendMail HTML contentType",
+            payload_html["message"]["body"]["contentType"] == "HTML"
+            and "color:red" in payload_html["message"]["body"]["content"],
+            str(payload_html["message"]["body"])[:200],
         )
 
         # 郵件主旨 [bracket] = S 表檔名（非 PMWC Sync）
@@ -1171,9 +1229,25 @@ def main() -> int:
             sr.send_diff_email(
                 {"notify": {"mail_backend": "smtp"}},
                 subject="[PMWC Sync] test",
-                body="hello",
+                body="【有差異】\nhello",
+                html_body=(
+                    '<span style="color:red;font-weight:bold">有差異</span>'
+                    "<pre>hello</pre>"
+                ),
             )
             fake = _FakeSMTP.last
+            multipart_ok = False
+            if fake is not None and getattr(fake, "msg", None) is not None:
+                msg = fake.msg
+                multipart_ok = (
+                    msg.is_multipart()
+                    and any(
+                        p.get_content_type() == "text/plain" for p in msg.iter_parts()
+                    )
+                    and any(
+                        p.get_content_type() == "text/html" for p in msg.iter_parts()
+                    )
+                )
             check(
                 "send_diff_email SMTP uses inferred Gmail host",
                 fake is not None
@@ -1182,6 +1256,11 @@ def main() -> int:
                 and fake.user == "bot@gmail.com"
                 and fake.msg["To"] == "bob.lin@qsitw.com",
                 f"host={getattr(fake, 'host', None)}",
+            )
+            check(
+                "send_diff_email SMTP multipart/alternative HTML",
+                multipart_ok,
+                f"multipart={getattr(getattr(fake, 'msg', None), 'is_multipart', lambda: None)()}",
             )
         finally:
             _smtplib.SMTP = saved_smtp  # type: ignore[misc]
