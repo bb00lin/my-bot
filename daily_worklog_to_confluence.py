@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from requests.auth import HTTPBasicAuth
 from urllib.parse import urlparse
-from bs4 import BeautifulSoup, Tag, NavigableString
+from bs4 import BeautifulSoup, Tag, NavigableString, CData
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
 
@@ -104,6 +104,294 @@ class SettingsManager:
         return self.config.get(key, default)
 
 SETTINGS = SettingsManager()
+
+# Worklog 圖片標記：GUI 寫入 [[IMG:檔名]]，同步到 Confluence 時嵌入
+IMG_MARKER_RE = re.compile(r'\[\[IMG:([^\]]+?)\]\]', re.IGNORECASE)
+PENDING_CONF_IMAGES = []  # {issue_key, jira_filename, conf_filename}
+
+def conf_unique_img_name(issue_key, jira_filename):
+    safe = re.sub(r'[^\w.\-]+', '_', os.path.basename(jira_filename.strip()))
+    return f"wl_{issue_key}_{safe}"
+
+def queue_worklog_image(issue_key, jira_filename):
+    if not issue_key or not jira_filename:
+        return None
+    conf_name = conf_unique_img_name(issue_key, jira_filename)
+    entry = {
+        "issue_key": issue_key,
+        "jira_filename": os.path.basename(jira_filename.strip()),
+        "conf_filename": conf_name,
+    }
+    if not any(
+        e["issue_key"] == entry["issue_key"] and e["jira_filename"] == entry["jira_filename"]
+        for e in PENDING_CONF_IMAGES
+    ):
+        PENDING_CONF_IMAGES.append(entry)
+    return conf_name
+
+def _approx_display_width(s):
+    """粗估字元顯示寬度（emoji / 寬字元以 2 欄計算）。"""
+    w = 0
+    for ch in s or "":
+        o = ord(ch)
+        if o > 0x2E80 or (0x1F300 <= o <= 0x1FAFF) or (0x2600 <= o <= 0x27BF):
+            w += 2
+        else:
+            w += 1
+    return w
+
+
+def _looks_space_aligned(text):
+    """判斷是否為空白對齊的表格 / 多欄文字（勿對這類內容用逗號斷行）。"""
+    if not text:
+        return False
+    lines = text.split("\n")
+    multi_space_lines = sum(1 for line in lines if "  " in line)
+    if multi_space_lines >= 1 and len(lines) >= 2:
+        return True
+    if re.search(r"\S  +\S.*\S  +\S", text):
+        return True
+    return False
+
+
+def _apply_hang_indent(text, hang_indent_prefix):
+    """延續行加上與前綴等寬的 NBSP，使文字對齊第一行註解起點。"""
+    if not hang_indent_prefix or "\n" not in text:
+        return text
+    indent = "\u00a0" * max(1, _approx_display_width(hang_indent_prefix))
+    lines = text.split("\n")
+    out = [lines[0]]
+    for line in lines[1:]:
+        out.append(indent + line if line else line)
+    return "\n".join(out)
+
+
+def append_wysiwyg_comment(
+    soup,
+    parent_tag,
+    comment_text,
+    color_style="",
+    issue_key=None,
+    indent_continuation=False,
+    hang_indent_prefix="└ 📝 ",
+):
+    """將 worklog 備註以所見即所得方式寫入 Confluence（保留空白對齊 + 圖片標記）。"""
+    if comment_text is None:
+        comment_text = ""
+    # 勿對每行 strip：會破壞 GUI 用空白對齊的表格
+    text = str(comment_text).replace("\r\n", "\n").replace("\r", "\n")
+    # 移除方括號包圍時避開 [[IMG:...]] 標記
+    text = re.sub(r"(?<!\[)\[(?!\[IMG:)", "", text)
+    text = re.sub(r"(?<!\])\](?!\])", "", text)
+
+    if SETTINGS.get("enable_newline"):
+        delimiters = [d for d in SETTINGS.get("newline_chars", "; ,").split(" ") if d]
+        # 空白對齊表格用空白分欄，逗號斷行會拆壞內容；僅保留非逗號分隔符
+        if _looks_space_aligned(text) or ("\n" in text and any("  " in ln for ln in text.split("\n"))):
+            delimiters = [d for d in delimiters if d != ","]
+        if delimiters:
+            parts = IMG_MARKER_RE.split(text)
+            rebuilt = []
+            for i, chunk in enumerate(parts):
+                if i % 2 == 0:
+                    for dlim in delimiters:
+                        chunk = chunk.replace(dlim, "\n")
+                    rebuilt.append(chunk)
+                else:
+                    rebuilt.append(f"[[IMG:{chunk}]]")
+            text = "".join(rebuilt)
+
+    use_pre = ("\n" in text) or _looks_space_aligned(text)
+    hang_prefix = hang_indent_prefix if indent_continuation else ""
+    hang_spaces = " " * max(1, _approx_display_width(hang_prefix)) if hang_prefix else ""
+
+    wrapper_style = (
+        f"{color_style or 'color: #555555;'}; white-space: pre-wrap; "
+        "font-family: Consolas, 'Courier New', monospace; font-size: 90%;"
+    ).replace(";;", ";")
+    pre_style = (
+        f"{color_style or 'color: #555555;'}; margin: 0; padding: 0; border: none; "
+        "background: transparent; white-space: pre; "
+        "font-family: Consolas, 'Courier New', monospace; font-size: 90%;"
+    ).replace(";;", ";")
+
+    def _nb(s):
+        return s.replace(" ", "\u00a0")
+
+    def _render_inline_span(block):
+        """第一行（或單行）緊接在 └ 📝 之後，空白轉 NBSP。"""
+        span = soup.new_tag("span", style=wrapper_style)
+        parts = re.split(r"(https?://[^\s]+)", block)
+        for part in parts:
+            if part.startswith("http"):
+                a_tag = soup.new_tag(
+                    "a",
+                    href=part,
+                    target="_blank",
+                    style="color: #2980b9; text-decoration: none;",
+                )
+                a_tag.string = part
+                span.append(a_tag)
+            elif part:
+                span.append(soup.new_string(_nb(part)))
+        parent_tag.append(span)
+
+    def _append_preformatted(block_text):
+        """多行 / 表格：Confluence noformat（等寬）優先，失敗則 <pre>。"""
+        rendered = block_text.replace("\u00a0", " ")
+        try:
+            macro = soup.new_tag(
+                "ac:structured-macro",
+                **{"ac:name": "noformat", "ac:schema-version": "1"},
+            )
+            body = soup.new_tag("ac:plain-text-body")
+            body.append(CData(rendered))
+            macro.append(body)
+            parent_tag.append(macro)
+        except Exception:
+            pre = soup.new_tag("pre", style=pre_style)
+            pre.append(soup.new_string(rendered))
+            parent_tag.append(pre)
+
+    def _append_text_block(chunk, is_first_block):
+        if chunk is None or chunk == "":
+            return
+
+        lines = chunk.split("\n")
+
+        # 空白對齊表格：整段同一等寬區塊，否則欄位會因首行/續行字型不同而錯位
+        if _looks_space_aligned(chunk) or (use_pre and _looks_space_aligned("\n".join(lines))):
+            _append_preformatted(chunk)
+            return
+
+        # 一般多行註解：首行接在 └ 📝 後；延續行掛縮排對齊首字
+        if is_first_block and hang_prefix and len(lines) > 1:
+            first, rest = lines[0], lines[1:]
+            if first:
+                _render_inline_span(first)
+            cont_lines = [(hang_spaces + line) if line else line for line in rest]
+            parent_tag.append(soup.new_tag("br"))
+            if use_pre:
+                _append_preformatted("\n".join(cont_lines))
+            else:
+                span = soup.new_tag("span", style=wrapper_style)
+                for li, line in enumerate(cont_lines):
+                    if line:
+                        span.append(soup.new_string(_nb(line)))
+                    if li < len(cont_lines) - 1:
+                        span.append(soup.new_tag("br"))
+                parent_tag.append(span)
+            return
+
+        if is_first_block and len(lines) == 1:
+            _render_inline_span(lines[0])
+            return
+
+        block = chunk
+        if hang_prefix:
+            if is_first_block:
+                block = _apply_hang_indent(block, hang_prefix).replace("\u00a0", " ")
+            else:
+                block = "\n".join((hang_spaces + line) if line else line for line in lines)
+
+        if use_pre or "\n" in block:
+            _append_preformatted(block)
+            return
+
+        _render_inline_span(block)
+
+    pos = 0
+    first_text = True
+    for m in IMG_MARKER_RE.finditer(text):
+        before = text[pos:m.start()]
+        if before:
+            _append_text_block(before, first_text)
+            first_text = False
+
+        jira_fn = m.group(1).strip()
+        conf_fn = queue_worklog_image(issue_key, jira_fn) if issue_key else None
+        if conf_fn:
+            img = soup.new_tag("ac:image", **{"ac:width": "640"})
+            ri = soup.new_tag("ri:attachment", **{"ri:filename": conf_fn})
+            img.append(ri)
+            parent_tag.append(img)
+            parent_tag.append(soup.new_tag("br"))
+        else:
+            span = soup.new_tag("span", style=wrapper_style)
+            span.string = _nb(m.group(0))
+            parent_tag.append(span)
+        pos = m.end()
+        first_text = False
+
+    after = text[pos:]
+    if not after and pos == 0:
+        after = text
+    if after:
+        _append_text_block(after, first_text)
+
+def upload_pending_images_to_confluence(page_id):
+    """從 Jira Issue 附件下載並上傳到 Confluence 頁面。"""
+    if not PENDING_CONF_IMAGES:
+        return
+    print(f"📷 準備同步 {len(PENDING_CONF_IMAGES)} 張 worklog 圖片至 Confluence...")
+    attach_url = f"{JIRA_URL}/wiki/rest/api/content/{page_id}/child/attachment"
+    headers = {"X-Atlassian-Token": "no-check"}
+
+    for entry in PENDING_CONF_IMAGES:
+        issue_key = entry["issue_key"]
+        jira_fn = entry["jira_filename"]
+        conf_fn = entry["conf_filename"]
+        try:
+            iss_res = requests.get(
+                f"{JIRA_URL}/rest/api/2/issue/{issue_key}?fields=attachment",
+                auth=ADMIN_AUTH, timeout=20,
+            )
+            if iss_res.status_code != 200:
+                print(f"  ⚠️ 無法讀取 {issue_key} 附件清單: {iss_res.status_code}")
+                continue
+            attachments = iss_res.json().get("fields", {}).get("attachment", []) or []
+            matched = next(
+                (a for a in attachments if a.get("filename", "").lower() == jira_fn.lower()),
+                None,
+            )
+            if not matched:
+                print(f"  ⚠️ {issue_key} 找不到附件 {jira_fn}")
+                continue
+            bin_res = requests.get(matched["content"], auth=ADMIN_AUTH, timeout=60)
+            if bin_res.status_code != 200:
+                print(f"  ⚠️ 下載失敗 {jira_fn}: {bin_res.status_code}")
+                continue
+            mime = matched.get("mimeType") or "application/octet-stream"
+            files = {"file": (conf_fn, bin_res.content, mime)}
+            up = requests.post(attach_url, auth=ADMIN_AUTH, headers=headers, files=files, timeout=60)
+            if up.status_code in (200, 201):
+                print(f"  ✅ 已上傳 {conf_fn}")
+            else:
+                # 檔名可能已存在：嘗試更新既有附件
+                try:
+                    existing = requests.get(
+                        f"{attach_url}?filename={conf_fn}",
+                        auth=ADMIN_AUTH, timeout=20,
+                    )
+                    results = (existing.json() or {}).get("results", []) if existing.status_code == 200 else []
+                    if results:
+                        att_id = results[0]["id"]
+                        upd = requests.post(
+                            f"{JIRA_URL}/wiki/rest/api/content/{page_id}/child/attachment/{att_id}/data",
+                            auth=ADMIN_AUTH, headers=headers, files=files, timeout=60,
+                        )
+                        if upd.status_code in (200, 201):
+                            print(f"  ✅ 已更新既有附件 {conf_fn}")
+                        else:
+                            print(f"  ⚠️ 更新附件失敗 {conf_fn}: {upd.status_code} {upd.text[:200]}")
+                    else:
+                        print(f"  ⚠️ 上傳失敗 {conf_fn}: {up.status_code} {up.text[:200]}")
+                except Exception as e2:
+                    print(f"  ⚠️ 上傳/更新例外 {conf_fn}: {e2}")
+        except Exception as e:
+            print(f"  ⚠️ 圖片同步失敗 {issue_key}/{jira_fn}: {e}")
+
+    PENDING_CONF_IMAGES.clear()
 
 # --- 3. 核心輔助函式 ---
 EMOJI_MAP = {
@@ -832,56 +1120,16 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
         if SETTINGS.get("show_comment"):
             dur_text = f"({log['duration']}) " if log['duration'] != "-" and log['duration'] != "0m" else ""
             comment_text = log['comment']
-            
-            if SETTINGS.get("enable_newline"):
-                delimiters = [d for d in SETTINGS.get("newline_chars", "; ,").split(" ") if d]
-                for d in delimiters:
-                    comment_text = comment_text.replace(d, '\n')
-                
-                comment_text = comment_text.replace('[', '').replace(']', '')
-                lines = [l.strip() for l in comment_text.split('\n') if l.strip()]
-                seen_urls = set()
-                final_lines = []
-                
-                for line in lines:
-                    urls_in_line = re.findall(r'(https?://[^\s]+)', line)
-                    if len(urls_in_line) == 1 and line == urls_in_line[0] and line in seen_urls:
-                        continue
-                    seen_urls.update(urls_in_line)
-                    final_lines.append(line)
-                
-                if not final_lines:
-                    p3.append(soup.new_string(f"└ 📝 {dur_text}"))
-                else:
-                    p3.append(soup.new_string(f"└ 📝 {dur_text}"))
-                    for idx, line in enumerate(final_lines):
-                        parts = re.split(r'(https?://[^\s]+)', line)
-                        for part in parts:
-                            if part.startswith('http'):
-                                a_tag = soup.new_tag("a", href=part, target="_blank", style="color: #2980b9; text-decoration: none;")
-                                a_tag.string = part
-                                p3.append(a_tag)
-                            elif part:
-                                p3.append(soup.new_string(part))
-                                
-                        if idx < len(final_lines) - 1:
-                            p3.append(soup.new_tag("br"))
-                            align_spacer = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
-                            align_spacer.string = "----------"
-                            p3.append(align_spacer)
-            else:
-                comment_text = comment_text.replace('\n', ' ').replace('\r', '')
-                comment_text = comment_text.replace('[', '').replace(']', '')
-                p3.append(soup.new_string(f"└ 📝 {dur_text}"))
-                
-                parts = re.split(r'(https?://[^\s]+)', comment_text)
-                for part in parts:
-                    if part.startswith('http'):
-                        a_tag = soup.new_tag("a", href=part, target="_blank", style="color: #2980b9; text-decoration: none;")
-                        a_tag.string = part
-                        p3.append(a_tag)
-                    elif part:
-                        p3.append(soup.new_string(part))
+            comment_prefix = f"└ 📝 {dur_text}"
+            p3.append(soup.new_string(comment_prefix))
+            if comment_text:
+                append_wysiwyg_comment(
+                    soup, p3, comment_text,
+                    color_style="color: #555555;",
+                    issue_key=log.get('key'),
+                    indent_continuation=True,
+                    hang_indent_prefix=comment_prefix,
+                )
                         
             if SETTINGS.get("show_duedate") and log.get('duedate') and not is_tbd and ("標題列" not in mode or "雙管" in mode):
                 span_due = soup.new_tag("span", style="color: gray; font-size: 50%;")
@@ -1130,7 +1378,8 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                 is_target = d_info['date'].date() in [sd.date() for sd in selected_dates]
                 color_style = "color: #e74c3c; font-weight: bold;" if is_target else "color: #555555;"
 
-                p_comment.append(soup.new_string("└ 📝 "))
+                comment_prefix = "└ 📝 "
+                p_comment.append(soup.new_string(comment_prefix))
                 
                 comment_text = d_info['comment']
                 if not comment_text:
@@ -1140,59 +1389,17 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                         comment_text = "(僅狀態改變)"
                     else:
                         comment_text = "(無紀錄)"
-                    
                     comment_span = soup.new_tag("span", style=color_style)
                     comment_span.string = comment_text
                     p_comment.append(comment_span)
                 else:
-                    comment_span = soup.new_tag("span", style=color_style)
-                    
-                    if SETTINGS.get("enable_newline"):
-                        delimiters = [d for d in SETTINGS.get("newline_chars", "; ,").split(" ") if d]
-                        for d in delimiters:
-                            comment_text = comment_text.replace(d, '\n')
-                        
-                        comment_text = comment_text.replace('[', '').replace(']', '')
-                        lines = [l.strip() for l in comment_text.split('\n') if l.strip()]
-                        seen_urls = set()
-                        final_lines = []
-                        
-                        for line in lines:
-                            urls_in_line = re.findall(r'(https?://[^\s]+)', line)
-                            if len(urls_in_line) == 1 and line == urls_in_line[0] and line in seen_urls:
-                                continue
-                            seen_urls.update(urls_in_line)
-                            final_lines.append(line)
-                        
-                        for idx, line in enumerate(final_lines):
-                            parts = re.split(r'(https?://[^\s]+)', line)
-                            for part in parts:
-                                if part.startswith('http'):
-                                    a_tag = soup.new_tag("a", href=part, target="_blank", style="color: #2980b9; text-decoration: none;")
-                                    a_tag.string = part
-                                    comment_span.append(a_tag)
-                                elif part:
-                                    comment_span.append(soup.new_string(part))
-                                    
-                            if idx < len(final_lines) - 1:
-                                comment_span.append(soup.new_tag("br"))
-                                align_spacer = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
-                                align_spacer.string = "----------"
-                                comment_span.append(align_spacer)
-                    else:
-                        comment_text = comment_text.replace('\n', ' ').replace('\r', '')
-                        comment_text = comment_text.replace('[', '').replace(']', '')
-                        
-                        parts = re.split(r'(https?://[^\s]+)', comment_text)
-                        for part in parts:
-                            if part.startswith('http'):
-                                a_tag = soup.new_tag("a", href=part, target="_blank", style="color: #2980b9; text-decoration: none;")
-                                a_tag.string = part
-                                comment_span.append(a_tag)
-                            elif part:
-                                comment_span.append(soup.new_string(part))
-                        
-                    p_comment.append(comment_span)
+                    append_wysiwyg_comment(
+                        soup, p_comment, comment_text,
+                        color_style=color_style,
+                        issue_key=log.get('key'),
+                        indent_continuation=True,
+                        hang_indent_prefix=comment_prefix,
+                    )
                     
                 div_row.append(p_comment)
 
@@ -1448,6 +1655,7 @@ def run_clear_logic():
 
 def run_sync_logic():
     start_time = time.time()
+    PENDING_CONF_IMAGES.clear()
     
     sync_status = "success"
     sync_message = ""
@@ -1712,6 +1920,7 @@ def run_sync_logic():
 
         if page_needs_update:
             print(f"\n💾 發現頁面有變動，正在將最終結果儲存至 Confluence...")
+            upload_pending_images_to_confluence(page_id)
             url = f"{api_endpoint}/{page_id}"
             payload = {
                 "version": {"number": page_data['version']['number'] + 1, "minorEdit": SETTINGS.get("minor_edit")},
