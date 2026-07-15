@@ -169,8 +169,12 @@ def append_wysiwyg_comment(
     color_style="",
     issue_key=None,
     bg_color="#ffffff",
+    hang_prefix="└ 📝 ",
+    left_gutter="--------",
 ):
-    """以原始 WeeklyReport 格式寫入備註（單一 span + br，支援 [[IMG:...]]）。"""
+    """以原始 WeeklyReport 格式寫入備註（單一 span + br，支援 [[IMG:...]]）。
+    續行會加上與首行文字對齊的隱形縮排（left_gutter + hang_prefix）。
+    """
     if comment_text is None:
         comment_text = ""
     text = str(comment_text).replace("\r\n", "\n").replace("\r", "\n")
@@ -218,10 +222,11 @@ def append_wysiwyg_comment(
             pos = m.end()
         _append_linked_text(container, line[pos:])
 
-    def _append_line_break():
+    def _append_hang_break():
+        # 換行後對齊到首行「文字」起點（與 └ 📝 後相同位置），勿另開 noformat 區塊
         comment_span.append(soup.new_tag("br"))
         align_spacer = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
-        align_spacer.string = "----------"
+        align_spacer.string = f"{left_gutter}{hang_prefix}"
         comment_span.append(align_spacer)
 
     if SETTINGS.get("enable_newline"):
@@ -239,12 +244,70 @@ def append_wysiwyg_comment(
         for idx, line in enumerate(final_lines):
             _append_line_body(comment_span, line)
             if idx < len(final_lines) - 1:
-                _append_line_break()
+                _append_hang_break()
     else:
         flat = text.replace("\n", " ").replace("\r", "")
         _append_line_body(comment_span, flat)
 
     parent_tag.append(comment_span)
+
+def is_image_attachment(att):
+    mime = (att.get("mimeType") or "").lower()
+    name = (att.get("filename") or "").lower()
+    if mime.startswith("image/"):
+        return True
+    return any(name.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"))
+
+def attachment_created_date_tz8(att):
+    created = att.get("created") or ""
+    dt = parse_jira_date_to_dt(created)
+    if dt:
+        return dt.strftime("%Y-%m-%d")
+    return created[:10] if created else ""
+
+def list_day_image_filenames(issue_obj_or_atts, day_str, exclude_names=None):
+    """依附件建立日期（台北）篩出該日圖片檔名；exclude 避免與 [[IMG:]] 重複。"""
+    exclude = {n.lower() for n in (exclude_names or [])}
+    if isinstance(issue_obj_or_atts, dict) and "fields" in issue_obj_or_atts:
+        attachments = (issue_obj_or_atts.get("fields") or {}).get("attachment") or []
+    elif isinstance(issue_obj_or_atts, list):
+        attachments = issue_obj_or_atts
+    else:
+        attachments = []
+    result = []
+    for att in attachments:
+        if not is_image_attachment(att):
+            continue
+        fn = att.get("filename") or ""
+        if not fn or fn.lower() in exclude:
+            continue
+        if attachment_created_date_tz8(att) == day_str:
+            result.append(fn)
+            exclude.add(fn.lower())
+    return result
+
+def append_day_attachment_images(
+    soup, parent_tag, issue_key, filenames, color_style="", bg_color="#ffffff",
+    hang_prefix="└ 📝 ", left_gutter="--------",
+):
+    """把指定檔名圖片接在備註後方（延續同縮排）。"""
+    if not issue_key or not filenames:
+        return
+    for fn in filenames:
+        parent_tag.append(soup.new_tag("br"))
+        spacer = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
+        spacer.string = f"{left_gutter}{hang_prefix}"
+        parent_tag.append(spacer)
+        conf_fn = queue_worklog_image(issue_key, fn)
+        if conf_fn:
+            img = soup.new_tag("ac:image", **{"ac:width": "640"})
+            ri = soup.new_tag("ri:attachment", **{"ri:filename": conf_fn})
+            img.append(ri)
+            parent_tag.append(img)
+        else:
+            span = soup.new_tag("span", style=color_style or "color: #555555;")
+            span.string = f"[[IMG:{fn}]]"
+            parent_tag.append(span)
 
 def upload_pending_images_to_confluence(page_id):
     """從 Jira Issue 附件下載並上傳到 Confluence 頁面。"""
@@ -482,7 +545,7 @@ def fetch_all_recent_issues(min_date):
         payload = {
             "jql": jql, 
             "maxResults": 100, 
-            "fields": ["summary", "status", "project", "parent", "labels", "worklog", "assignee", "duedate", "timetracking", "updated"],
+            "fields": ["summary", "status", "project", "parent", "labels", "worklog", "assignee", "duedate", "timetracking", "updated", "attachment"],
             "expand": "changelog" 
         }
         
@@ -558,7 +621,7 @@ def get_remote_links(key):
 def fetch_pending_tasks(account_id, updated_keys, target_date):
     if not account_id: return [], [], [], [], [], [], []
     jql = f'assignee = "{account_id}" AND resolution = Unresolved'
-    payload = {"jql": jql, "maxResults": 100, "fields": ["summary", "status", "project", "duedate", "created", "worklog", "comment", "parent"]}
+    payload = {"jql": jql, "maxResults": 100, "fields": ["summary", "status", "project", "duedate", "created", "worklog", "comment", "parent", "attachment"]}
     
     pending_in_progress, pending_waiting, pending_todo, pending_candidate = [], [], [], []
     pending_blocked, pending_abort, pending_resume = [], [], []
@@ -835,17 +898,20 @@ def enrich_with_weekly_data(base_logs, name, email, account_id, days_to_process,
                     unique_comments.append(w['comment'])
             
             joined_comment = " / \n".join(unique_comments) if unique_comments else ""
+            exclude_imgs = [m.strip() for m in IMG_MARKER_RE.findall(joined_comment)]
+            day_images = list_day_image_filenames(issue_obj, day_str, exclude_names=exclude_imgs)
             
-            has_log = bool(wls or trans)
+            has_log = bool(wls or trans or day_images)
             if SETTINGS.get("hide_status_only"):
-                if total_mins_day == 0 and not joined_comment.strip():
+                if total_mins_day == 0 and not joined_comment.strip() and not day_images:
                     has_log = False
                     
             if has_log: has_week_log = True
             
             daily_days.append({
                 "date": target_date, "day_name": day_name, "day_short": day_short, "dur_str": dur_str,
-                "total_mins_day": total_mins_day, "comment": joined_comment, "transition": trans, "has_log": has_log
+                "total_mins_day": total_mins_day, "comment": joined_comment, "transition": trans, "has_log": has_log,
+                "day_images": day_images,
             })
         
         if not has_week_log: continue
@@ -1045,7 +1111,28 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                     color_style="color: #555555;",
                     issue_key=log.get('key'),
                     bg_color=bg_color,
+                    hang_prefix=comment_prefix,
+                    left_gutter="--------",
                 )
+            day_str = log.get("started_date") or ""
+            exclude_imgs = [m.strip() for m in IMG_MARKER_RE.findall(comment_text or "")]
+            # style2：若 log 未附 day_images，當場依 started_date 與 issue 附件補上
+            day_imgs = log.get("day_images")
+            if day_imgs is None and log.get("key") and day_str:
+                try:
+                    iss_res = requests.get(
+                        f"{JIRA_URL}/rest/api/2/issue/{log['key']}?fields=attachment",
+                        auth=ADMIN_AUTH, timeout=15,
+                    )
+                    atts = iss_res.json().get("fields", {}).get("attachment", []) if iss_res.status_code == 200 else []
+                    day_imgs = list_day_image_filenames(atts, day_str, exclude_names=exclude_imgs)
+                except Exception:
+                    day_imgs = []
+            append_day_attachment_images(
+                soup, p3, log.get("key"), day_imgs or [],
+                color_style="color: #555555;", bg_color=bg_color,
+                hang_prefix=comment_prefix, left_gutter="--------",
+            )
                         
             if SETTINGS.get("show_duedate") and log.get('duedate') and not is_tbd and ("標題列" not in mode or "雙管" in mode):
                 span_due = soup.new_tag("span", style="color: gray; font-size: 50%;")
@@ -1298,11 +1385,14 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                 p_comment.append(soup.new_string(comment_prefix))
                 
                 comment_text = d_info['comment']
+                day_imgs = d_info.get("day_images") or []
                 if not comment_text:
                     if d_info.get('total_mins_day', 0) > 0:
                         comment_text = "(無填寫工作日誌)"
                     elif d_info.get('transition'):
                         comment_text = "(僅狀態改變)"
+                    elif day_imgs:
+                        comment_text = "(附件圖片)"
                     else:
                         comment_text = "(無紀錄)"
                     comment_span = soup.new_tag("span", style=color_style)
@@ -1314,7 +1404,14 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                         color_style=color_style,
                         issue_key=log.get('key'),
                         bg_color=bg_color,
+                        hang_prefix=comment_prefix,
+                        left_gutter="--------",
                     )
+                append_day_attachment_images(
+                    soup, p_comment, log.get("key"), day_imgs,
+                    color_style=color_style, bg_color=bg_color,
+                    hang_prefix=comment_prefix, left_gutter="--------",
+                )
                     
                 div_row.append(p_comment)
 
