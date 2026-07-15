@@ -163,8 +163,11 @@ def _apply_newline_delimiters(text):
 
 
 def _invisible_hang_indent(left_gutter="--------", hang_prefix="└ 📝 "):
-    """相容舊呼叫；續行不再做懸吊縮排（只換行），避免 Module 等對齊過深。"""
-    return ""
+    """續行縮排：只保留與首行相同的 gutter（背景色隱形的 '-'），對齊到 └ 位置。
+    不為 📝 前綴再加空白（會造成「對齊到首行文字」看起來縮太深）；也不放 └/📝。
+    hang_prefix 參數保留以相容呼叫端，目前不參與寬度計算。
+    """
+    return left_gutter or ""
 
 def append_wysiwyg_comment(
     soup,
@@ -177,7 +180,7 @@ def append_wysiwyg_comment(
     left_gutter="--------",
 ):
     """以原始 WeeklyReport 格式寫入備註（單一 span + br，支援 [[IMG:...]]）。
-    僅第一行前面由外部放 └ 📝；續行只換行、不加隱形縮排（與 └ 同層左側對齊）。
+    僅第一行前面由外部放 └ 📝；續行只補 gutter，對齊 └，不再重複符號、也不懸吊到文字起點。
     """
     if comment_text is None:
         comment_text = ""
@@ -226,6 +229,12 @@ def append_wysiwyg_comment(
             pos = m.end()
         _append_linked_text(container, line[pos:])
 
+    def _append_hang_break():
+        comment_span.append(soup.new_tag("br"))
+        align_spacer = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
+        align_spacer.string = _invisible_hang_indent(left_gutter, hang_prefix)
+        comment_span.append(align_spacer)
+
     if SETTINGS.get("enable_newline"):
         text = _apply_newline_delimiters(text)
         lines = [l.strip() for l in text.split("\n") if l.strip()]
@@ -241,7 +250,7 @@ def append_wysiwyg_comment(
         for idx, line in enumerate(final_lines):
             _append_line_body(comment_span, line)
             if idx < len(final_lines) - 1:
-                comment_span.append(soup.new_tag("br"))
+                _append_hang_break()
     else:
         flat = text.replace("\n", " ").replace("\r", "")
         _append_line_body(comment_span, flat)
@@ -292,6 +301,9 @@ def append_day_attachment_images(
         return
     for fn in filenames:
         parent_tag.append(soup.new_tag("br"))
+        spacer = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
+        spacer.string = _invisible_hang_indent(left_gutter, hang_prefix)
+        parent_tag.append(spacer)
         conf_fn = queue_worklog_image(issue_key, fn)
         if conf_fn:
             img = soup.new_tag("ac:image", **{"ac:width": "640"})
