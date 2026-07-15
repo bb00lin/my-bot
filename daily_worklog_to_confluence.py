@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from requests.auth import HTTPBasicAuth
 from urllib.parse import urlparse
-from bs4 import BeautifulSoup, Tag, NavigableString, CData
+from bs4 import BeautifulSoup, Tag, NavigableString
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
 
@@ -129,41 +129,37 @@ def queue_worklog_image(issue_key, jira_filename):
         PENDING_CONF_IMAGES.append(entry)
     return conf_name
 
-def _approx_display_width(s):
-    """粗估字元顯示寬度（emoji / 寬字元以 2 欄計算）。"""
-    w = 0
-    for ch in s or "":
-        o = ord(ch)
-        if o > 0x2E80 or (0x1F300 <= o <= 0x1FAFF) or (0x2600 <= o <= 0x27BF):
-            w += 2
-        else:
-            w += 1
-    return w
+def _strip_brackets_keep_img(text):
+    """移除一般 [ ]，保留 [[IMG:...]] 標記。"""
+    placeholders = {}
+
+    def _stash(m):
+        key = f"\x00IMG{len(placeholders)}\x00"
+        placeholders[key] = m.group(0)
+        return key
+
+    protected = IMG_MARKER_RE.sub(_stash, text)
+    protected = protected.replace("[", "").replace("]", "")
+    for key, value in placeholders.items():
+        protected = protected.replace(key, value)
+    return protected
 
 
-def _looks_space_aligned(text):
-    """判斷是否為空白對齊的表格 / 多欄文字（勿對這類內容用逗號斷行）。"""
-    if not text:
-        return False
-    lines = text.split("\n")
-    multi_space_lines = sum(1 for line in lines if "  " in line)
-    if multi_space_lines >= 1 and len(lines) >= 2:
-        return True
-    if re.search(r"\S  +\S.*\S  +\S", text):
-        return True
-    return False
-
-
-def _apply_hang_indent(text, hang_indent_prefix):
-    """延續行加上與前綴等寬的 NBSP，使文字對齊第一行註解起點。"""
-    if not hang_indent_prefix or "\n" not in text:
+def _apply_newline_delimiters(text):
+    """依設定將分隔符換成換行，且不動 [[IMG:...]] 內容。"""
+    delimiters = [d for d in SETTINGS.get("newline_chars", "; ,").split(" ") if d]
+    if not delimiters:
         return text
-    indent = "\u00a0" * max(1, _approx_display_width(hang_indent_prefix))
-    lines = text.split("\n")
-    out = [lines[0]]
-    for line in lines[1:]:
-        out.append(indent + line if line else line)
-    return "\n".join(out)
+    parts = IMG_MARKER_RE.split(text)
+    rebuilt = []
+    for i, chunk in enumerate(parts):
+        if i % 2 == 0:
+            for dlim in delimiters:
+                chunk = chunk.replace(dlim, "\n")
+            rebuilt.append(chunk)
+        else:
+            rebuilt.append(f"[[IMG:{chunk}]]")
+    return "".join(rebuilt)
 
 
 def append_wysiwyg_comment(
@@ -172,56 +168,30 @@ def append_wysiwyg_comment(
     comment_text,
     color_style="",
     issue_key=None,
-    indent_continuation=False,
-    hang_indent_prefix="└ 📝 ",
+    bg_color="#ffffff",
 ):
-    """將 worklog 備註以所見即所得方式寫入 Confluence（保留空白對齊 + 圖片標記）。"""
+    """以原始 WeeklyReport 格式寫入備註（單一 span + br，支援 [[IMG:...]]）。"""
     if comment_text is None:
         comment_text = ""
-    # 勿對每行 strip：會破壞 GUI 用空白對齊的表格
     text = str(comment_text).replace("\r\n", "\n").replace("\r", "\n")
-    # 移除方括號包圍時避開 [[IMG:...]] 標記
-    text = re.sub(r"(?<!\[)\[(?!\[IMG:)", "", text)
-    text = re.sub(r"(?<!\])\](?!\])", "", text)
+    text = _strip_brackets_keep_img(text)
 
-    if SETTINGS.get("enable_newline"):
-        delimiters = [d for d in SETTINGS.get("newline_chars", "; ,").split(" ") if d]
-        # 空白對齊表格用空白分欄，逗號斷行會拆壞內容；僅保留非逗號分隔符
-        if _looks_space_aligned(text) or ("\n" in text and any("  " in ln for ln in text.split("\n"))):
-            delimiters = [d for d in delimiters if d != ","]
-        if delimiters:
-            parts = IMG_MARKER_RE.split(text)
-            rebuilt = []
-            for i, chunk in enumerate(parts):
-                if i % 2 == 0:
-                    for dlim in delimiters:
-                        chunk = chunk.replace(dlim, "\n")
-                    rebuilt.append(chunk)
-                else:
-                    rebuilt.append(f"[[IMG:{chunk}]]")
-            text = "".join(rebuilt)
+    comment_span = soup.new_tag("span", style=color_style or "color: #555555;")
 
-    use_pre = ("\n" in text) or _looks_space_aligned(text)
-    hang_prefix = hang_indent_prefix if indent_continuation else ""
-    hang_spaces = " " * max(1, _approx_display_width(hang_prefix)) if hang_prefix else ""
+    def _append_image(container, jira_fn):
+        conf_fn = queue_worklog_image(issue_key, jira_fn) if issue_key else None
+        if conf_fn:
+            img = soup.new_tag("ac:image", **{"ac:width": "640"})
+            ri = soup.new_tag("ri:attachment", **{"ri:filename": conf_fn})
+            img.append(ri)
+            container.append(img)
+        else:
+            container.append(soup.new_string(f"[[IMG:{jira_fn}]]"))
 
-    wrapper_style = (
-        f"{color_style or 'color: #555555;'}; white-space: pre-wrap; "
-        "font-family: Consolas, 'Courier New', monospace; font-size: 90%;"
-    ).replace(";;", ";")
-    pre_style = (
-        f"{color_style or 'color: #555555;'}; margin: 0; padding: 0; border: none; "
-        "background: transparent; white-space: pre; "
-        "font-family: Consolas, 'Courier New', monospace; font-size: 90%;"
-    ).replace(";;", ";")
-
-    def _nb(s):
-        return s.replace(" ", "\u00a0")
-
-    def _render_inline_span(block):
-        """第一行（或單行）緊接在 └ 📝 之後，空白轉 NBSP。"""
-        span = soup.new_tag("span", style=wrapper_style)
-        parts = re.split(r"(https?://[^\s]+)", block)
+    def _append_linked_text(container, chunk):
+        if not chunk:
+            return
+        parts = re.split(r"(https?://[^\s]+)", chunk)
         for part in parts:
             if part.startswith("http"):
                 a_tag = soup.new_tag(
@@ -231,103 +201,50 @@ def append_wysiwyg_comment(
                     style="color: #2980b9; text-decoration: none;",
                 )
                 a_tag.string = part
-                span.append(a_tag)
+                container.append(a_tag)
             elif part:
-                span.append(soup.new_string(_nb(part)))
-        parent_tag.append(span)
+                container.append(soup.new_string(part))
 
-    def _append_preformatted(block_text):
-        """多行 / 表格：Confluence noformat（等寬）優先，失敗則 <pre>。"""
-        rendered = block_text.replace("\u00a0", " ")
-        try:
-            macro = soup.new_tag(
-                "ac:structured-macro",
-                **{"ac:name": "noformat", "ac:schema-version": "1"},
-            )
-            body = soup.new_tag("ac:plain-text-body")
-            body.append(CData(rendered))
-            macro.append(body)
-            parent_tag.append(macro)
-        except Exception:
-            pre = soup.new_tag("pre", style=pre_style)
-            pre.append(soup.new_string(rendered))
-            parent_tag.append(pre)
-
-    def _append_text_block(chunk, is_first_block):
-        if chunk is None or chunk == "":
+    def _append_line_body(container, line):
+        """單行內容：純 IMG 標記轉為圖片，其餘混排連結／文字。"""
+        only_img = IMG_MARKER_RE.fullmatch(line.strip())
+        if only_img:
+            _append_image(container, only_img.group(1).strip())
             return
+        pos = 0
+        for m in IMG_MARKER_RE.finditer(line):
+            _append_linked_text(container, line[pos:m.start()])
+            _append_image(container, m.group(1).strip())
+            pos = m.end()
+        _append_linked_text(container, line[pos:])
 
-        lines = chunk.split("\n")
+    def _append_line_break():
+        comment_span.append(soup.new_tag("br"))
+        align_spacer = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
+        align_spacer.string = "----------"
+        comment_span.append(align_spacer)
 
-        # 空白對齊表格：整段同一等寬區塊，否則欄位會因首行/續行字型不同而錯位
-        if _looks_space_aligned(chunk) or (use_pre and _looks_space_aligned("\n".join(lines))):
-            _append_preformatted(chunk)
-            return
+    if SETTINGS.get("enable_newline"):
+        text = _apply_newline_delimiters(text)
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        seen_urls = set()
+        final_lines = []
+        for line in lines:
+            urls_in_line = re.findall(r"(https?://[^\s]+)", line)
+            if len(urls_in_line) == 1 and line == urls_in_line[0] and line in seen_urls:
+                continue
+            seen_urls.update(urls_in_line)
+            final_lines.append(line)
 
-        # 一般多行註解：首行接在 └ 📝 後；延續行掛縮排對齊首字
-        if is_first_block and hang_prefix and len(lines) > 1:
-            first, rest = lines[0], lines[1:]
-            if first:
-                _render_inline_span(first)
-            cont_lines = [(hang_spaces + line) if line else line for line in rest]
-            parent_tag.append(soup.new_tag("br"))
-            if use_pre:
-                _append_preformatted("\n".join(cont_lines))
-            else:
-                span = soup.new_tag("span", style=wrapper_style)
-                for li, line in enumerate(cont_lines):
-                    if line:
-                        span.append(soup.new_string(_nb(line)))
-                    if li < len(cont_lines) - 1:
-                        span.append(soup.new_tag("br"))
-                parent_tag.append(span)
-            return
+        for idx, line in enumerate(final_lines):
+            _append_line_body(comment_span, line)
+            if idx < len(final_lines) - 1:
+                _append_line_break()
+    else:
+        flat = text.replace("\n", " ").replace("\r", "")
+        _append_line_body(comment_span, flat)
 
-        if is_first_block and len(lines) == 1:
-            _render_inline_span(lines[0])
-            return
-
-        block = chunk
-        if hang_prefix:
-            if is_first_block:
-                block = _apply_hang_indent(block, hang_prefix).replace("\u00a0", " ")
-            else:
-                block = "\n".join((hang_spaces + line) if line else line for line in lines)
-
-        if use_pre or "\n" in block:
-            _append_preformatted(block)
-            return
-
-        _render_inline_span(block)
-
-    pos = 0
-    first_text = True
-    for m in IMG_MARKER_RE.finditer(text):
-        before = text[pos:m.start()]
-        if before:
-            _append_text_block(before, first_text)
-            first_text = False
-
-        jira_fn = m.group(1).strip()
-        conf_fn = queue_worklog_image(issue_key, jira_fn) if issue_key else None
-        if conf_fn:
-            img = soup.new_tag("ac:image", **{"ac:width": "640"})
-            ri = soup.new_tag("ri:attachment", **{"ri:filename": conf_fn})
-            img.append(ri)
-            parent_tag.append(img)
-            parent_tag.append(soup.new_tag("br"))
-        else:
-            span = soup.new_tag("span", style=wrapper_style)
-            span.string = _nb(m.group(0))
-            parent_tag.append(span)
-        pos = m.end()
-        first_text = False
-
-    after = text[pos:]
-    if not after and pos == 0:
-        after = text
-    if after:
-        _append_text_block(after, first_text)
+    parent_tag.append(comment_span)
 
 def upload_pending_images_to_confluence(page_id):
     """從 Jira Issue 附件下載並上傳到 Confluence 頁面。"""
@@ -1127,8 +1044,7 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                     soup, p3, comment_text,
                     color_style="color: #555555;",
                     issue_key=log.get('key'),
-                    indent_continuation=True,
-                    hang_indent_prefix=comment_prefix,
+                    bg_color=bg_color,
                 )
                         
             if SETTINGS.get("show_duedate") and log.get('duedate') and not is_tbd and ("標題列" not in mode or "雙管" in mode):
@@ -1397,8 +1313,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                         soup, p_comment, comment_text,
                         color_style=color_style,
                         issue_key=log.get('key'),
-                        indent_continuation=True,
-                        hang_indent_prefix=comment_prefix,
+                        bg_color=bg_color,
                     )
                     
                 div_row.append(p_comment)
