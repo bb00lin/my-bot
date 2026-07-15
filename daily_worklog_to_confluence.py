@@ -163,11 +163,11 @@ def _apply_newline_delimiters(text):
 
 
 def _invisible_hang_indent(left_gutter="--------", hang_prefix="└ 📝 "):
-    """續行縮排：與首行相同 gutter '-'（背景色隱形）+ 與前綴「字元數」相同的 NBSP。
-    不放 └/📝、不用全形空白、不對 emoji 做雙倍加寬（先前因此縮排過深）。
+    """續行縮排：只保留與首行相同的 gutter（背景色隱形的 '-'），對齊到 └ 位置。
+    不為 📝 前綴再加空白（會造成「對齊到首行文字」看起來縮太深）；也不放 └/📝。
+    hang_prefix 參數保留以相容呼叫端，目前不參與寬度計算。
     """
-    # hang_prefix 例如 "└ 📝 " → 4 個半形空白即可對齊文字起點
-    return (left_gutter or "") + ("\u00a0" * len(hang_prefix or ""))
+    return left_gutter or ""
 
 def append_wysiwyg_comment(
     soup,
@@ -180,7 +180,7 @@ def append_wysiwyg_comment(
     left_gutter="--------",
 ):
     """以原始 WeeklyReport 格式寫入備註（單一 span + br，支援 [[IMG:...]]）。
-    僅第一行前面由外部放 └ 📝；續行只用空白縮排對齊文字起點，不再重複符號。
+    僅第一行前面由外部放 └ 📝；續行只補 gutter，對齊 └，不再重複符號、也不懸吊到文字起點。
     """
     if comment_text is None:
         comment_text = ""
