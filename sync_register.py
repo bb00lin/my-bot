@@ -2301,10 +2301,24 @@ def _paginate_jira_search(
     return collected
 
 
+def _issue_key_sort_tuple(key: str) -> tuple[str, int]:
+    """PMWC-157 → ('PMWC', 157)；無法解析時回傳 (key, 0)。"""
+    text = (key or "").strip().upper()
+    if "-" in text:
+        prefix, _, num = text.partition("-")
+        if num.isdigit():
+            return prefix, int(num)
+    return text, 0
+
+
 def load_jira_register_index(
     client: AtlassianClient, project_key: str, task_type: str
 ) -> dict[str, dict[str, Any]]:
-    """register_id -> {key, status, parent}"""
+    """register_id -> {key, status, parent}
+
+    若多筆任務 summary 對到同一 Register ID，保留 **較舊** 的 key（數字較小），
+    避免後建的重複單覆寫索引後繼續更新幽靈副本。
+    """
     index: dict[str, dict[str, Any]] = {}
     issues: list[dict[str, Any]] = []
     for type_name in jql_issuetype_name_candidates(task_type):
@@ -2316,13 +2330,19 @@ def load_jira_register_index(
             break
     for issue in issues:
         rid = parse_register_id_from_summary(issue["fields"]["summary"])
-        if rid:
-            parent = issue["fields"].get("parent") or {}
-            index[rid] = {
-                "key": issue["key"],
-                "status": issue["fields"]["status"]["name"],
-                "parent_key": parent.get("key", ""),
-            }
+        if not rid:
+            continue
+        parent = issue["fields"].get("parent") or {}
+        candidate = {
+            "key": issue["key"],
+            "status": issue["fields"]["status"]["name"],
+            "parent_key": parent.get("key", ""),
+        }
+        existing = index.get(rid)
+        if existing is None or _issue_key_sort_tuple(candidate["key"]) < _issue_key_sort_tuple(
+            existing["key"]
+        ):
+            index[rid] = candidate
     return index
 
 
@@ -2349,21 +2369,43 @@ def find_jira_key_by_register_id(
     task_type: str,
     register_id: str,
 ) -> str:
-    """以 summary 前綴搜尋 Jira 任務（補 issue_index 遺漏）。"""
+    """以 summary／description 搜尋既有任務（補 issue_index 遺漏）。
+
+    注意：``summary ~ "ECO-05"`` 會因連字號被 Lucene 斷成 ECO / 05 而**搜不到**
+    ``ECO-05_...``（已用 MCP 實測）。必須用 phrase（含底線）或 description 全文。
+    若找到多筆，回傳 key 數字較小者（較早建立）。
+    """
+    rid = normalize_register_id(register_id)
+    if not rid:
+        return ""
+    # phrase：強制含底線，避免 "ECO-05" 斷詞；description 備用（建立時寫入 Register ID）
+    phrase = _jql_quote(f"{rid}_")
+    desc_phrase = _jql_quote(f"Register ID: {rid}")
+    jql_extra_candidates = (
+        f"summary ~ {phrase}",
+        f"description ~ {desc_phrase}",
+        f"text ~ {desc_phrase}",
+    )
+    matches: list[str] = []
     for type_name in jql_issuetype_name_candidates(task_type):
-        jql = (
-            f"project = {project_key} AND {jql_issuetype_equals(type_name)} "
-            f'AND summary ~ "{register_id}"'
-        )
-        try:
-            data = client.jira_search(jql, max_results=20, fields=["summary"])
-        except Exception:
-            continue
-        for issue in data.get("issues", []):
-            rid = parse_register_id_from_summary(issue["fields"]["summary"])
-            if rid == register_id:
-                return issue["key"]
-    return ""
+        type_clause = jql_issuetype_equals(type_name)
+        for extra in jql_extra_candidates:
+            jql = f"project = {project_key} AND {type_clause} AND {extra}"
+            try:
+                data = client.jira_search(jql, max_results=50, fields=["summary"])
+            except Exception:
+                continue
+            for issue in data.get("issues", []):
+                parsed = parse_register_id_from_summary(issue["fields"]["summary"])
+                if parsed == rid:
+                    key = issue["key"]
+                    if key not in matches:
+                        matches.append(key)
+        if matches:
+            break
+    if not matches:
+        return ""
+    return sorted(matches, key=_issue_key_sort_tuple)[0]
 
 
 def ensure_epic(
@@ -2496,13 +2538,35 @@ def sync_jira_for_rows(
         description = build_jira_description(row)
 
         existing = issue_index.get(row.register_id)
-        known_key = id_to_key.get(row.register_id) or (
-            existing["key"] if existing else ""
-        )
-        if not known_key:
+        map_key = id_to_key.get(row.register_id, "")
+        index_key = existing["key"] if existing else ""
+        known_key = ""
+        if is_valid_jira_key(map_key):
+            known_key = map_key
+        elif is_valid_jira_key(index_key):
+            known_key = index_key
+        else:
             known_key = find_jira_key_by_register_id(
                 client, project, task_type, row.register_id
             )
+
+        # C map／index／JQL 若對到不同 key（歷史重複建立），一律採用較舊者，避免再開新單
+        rival_keys: list[str] = []
+        for cand in (map_key, index_key):
+            if is_valid_jira_key(cand) and cand not in rival_keys:
+                rival_keys.append(cand)
+        if is_valid_jira_key(known_key) and known_key not in rival_keys:
+            rival_keys.append(known_key)
+        if len(rival_keys) > 1:
+            chosen = sorted(rival_keys, key=_issue_key_sort_tuple)[0]
+            others = [k for k in rival_keys if k != chosen]
+            msg = (
+                f"{row.register_id}: 發現重複 Jira {', '.join(rival_keys)}，"
+                f"採用較舊 {chosen}（請手動關閉/刪除 {', '.join(others)}）"
+            )
+            report.errors.append(msg)
+            print(f"警告: {msg}")
+            known_key = chosen
 
         timeline_fields = build_timeline_fields(row, sync_date, cfg)
 

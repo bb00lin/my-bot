@@ -656,6 +656,11 @@ def main() -> int:
         and sr.parse_register_id_from_summary("ID重複_RF-14_Some title") == "RF-14"
         and sr.parse_register_id_from_summary("RF-14_Some title") == "RF-14",
     )
+    check(
+        "重複 Jira key 採較舊者排序",
+        sr._issue_key_sort_tuple("PMWC-157") < sr._issue_key_sort_tuple("PMWC-175")
+        and sr._issue_key_sort_tuple("PMWC-9") < sr._issue_key_sort_tuple("PMWC-10"),
+    )
     dup_rows = [
         sr.RegisterRow(register_id="RF-01", title="A"),
         sr.RegisterRow(register_id="RF-02", title="B"),
