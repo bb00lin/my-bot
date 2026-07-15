@@ -162,6 +162,18 @@ def _apply_newline_delimiters(text):
     return "".join(rebuilt)
 
 
+def _invisible_hang_indent(left_gutter="--------", hang_prefix="└ 📝 "):
+    """續行縮排只用空白，絕不重複 └ / 📝 等可見符號（Confluence 會把着色隱形字仍顯示 emoji）。"""
+    hang_units = 0
+    for ch in hang_prefix or "":
+        # emoji / CJK 佔較寬
+        if ord(ch) > 0xFF:
+            hang_units += 2
+        else:
+            hang_units += 1
+    # 左縮排對齊面板 + 與首行前綴同寬的空白
+    return ("\u00a0" * len(left_gutter or "")) + ("\u3000" * max(2, hang_units))
+
 def append_wysiwyg_comment(
     soup,
     parent_tag,
@@ -173,7 +185,7 @@ def append_wysiwyg_comment(
     left_gutter="--------",
 ):
     """以原始 WeeklyReport 格式寫入備註（單一 span + br，支援 [[IMG:...]]）。
-    續行會加上與首行文字對齊的隱形縮排（left_gutter + hang_prefix）。
+    僅第一行前面由外部放 └ 📝；續行只用空白縮排對齊文字起點，不再重複符號。
     """
     if comment_text is None:
         comment_text = ""
@@ -223,10 +235,9 @@ def append_wysiwyg_comment(
         _append_linked_text(container, line[pos:])
 
     def _append_hang_break():
-        # 換行後對齊到首行「文字」起點（與 └ 📝 後相同位置），勿另開 noformat 區塊
         comment_span.append(soup.new_tag("br"))
         align_spacer = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
-        align_spacer.string = f"{left_gutter}{hang_prefix}"
+        align_spacer.string = _invisible_hang_indent(left_gutter, hang_prefix)
         comment_span.append(align_spacer)
 
     if SETTINGS.get("enable_newline"):
@@ -296,7 +307,7 @@ def append_day_attachment_images(
     for fn in filenames:
         parent_tag.append(soup.new_tag("br"))
         spacer = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
-        spacer.string = f"{left_gutter}{hang_prefix}"
+        spacer.string = _invisible_hang_indent(left_gutter, hang_prefix)
         parent_tag.append(spacer)
         conf_fn = queue_worklog_image(issue_key, fn)
         if conf_fn:
