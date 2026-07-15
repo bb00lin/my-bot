@@ -163,16 +163,11 @@ def _apply_newline_delimiters(text):
 
 
 def _invisible_hang_indent(left_gutter="--------", hang_prefix="└ 📝 "):
-    """續行縮排只用空白，絕不重複 └ / 📝 等可見符號（Confluence 會把着色隱形字仍顯示 emoji）。"""
-    hang_units = 0
-    for ch in hang_prefix or "":
-        # emoji / CJK 佔較寬
-        if ord(ch) > 0xFF:
-            hang_units += 2
-        else:
-            hang_units += 1
-    # 左縮排對齊面板 + 與首行前綴同寬的空白
-    return ("\u00a0" * len(left_gutter or "")) + ("\u3000" * max(2, hang_units))
+    """續行縮排：與首行相同 gutter '-'（背景色隱形）+ 與前綴「字元數」相同的 NBSP。
+    不放 └/📝、不用全形空白、不對 emoji 做雙倍加寬（先前因此縮排過深）。
+    """
+    # hang_prefix 例如 "└ 📝 " → 4 個半形空白即可對齊文字起點
+    return (left_gutter or "") + ("\u00a0" * len(hang_prefix or ""))
 
 def append_wysiwyg_comment(
     soup,
