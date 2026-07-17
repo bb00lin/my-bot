@@ -12,8 +12,8 @@ on:
         required: false
         default: ''
   schedule:
-    # 台灣時間週一至週五 03:00 = UTC 時間週日至週四 19:00
-    - cron: '0 19 * * 0-4'
+    # 台灣時間週二至週六 03:00 = UTC 時間週一至週五 19:00
+    - cron: '0 19 * * 1-5'
 
 jobs:
   build:
