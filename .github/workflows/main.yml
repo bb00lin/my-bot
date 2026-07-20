@@ -1,8 +1,8 @@
 name: DailyStockBot
 
 on:
-  schedule:
-    - cron: '10 08 * * 1-5' # 台北時間 16:10 執行 (UTC 08:10)
+  #schedule:
+    #- cron: '10 08 * * 1-5' # 台北時間 16:10 執行 (UTC 08:10)
   workflow_dispatch:
 
 permissions:
