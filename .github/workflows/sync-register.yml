@@ -1,4 +1,4 @@
-# SharePoint → Confluence → Jira 同步
+# Register → Confluence → Jira 同步（來源：Google Sheets 或 SharePoint）
 # 僅手動觸發：workflow_dispatch / repository_dispatch（無 cron 自動排程）
 name: Sync Register
 

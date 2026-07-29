@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-SharePoint Register (S) -> Confluence mail_checking (C) -> Jira PMWC sync.
+Register (S) -> Confluence mail_checking (C) -> Jira PMWC sync.
 
-S 表格為唯一資料來源；C 與 Jira 完全跟隨 S。
+S 表格為唯一資料來源（Google Sheets 或 SharePoint）；C 與 Jira 完全跟隨 S。
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
 
 import requests
 import yaml
@@ -1245,12 +1245,77 @@ def print_diff_report(diff: RegisterDiff, *, dry_run: bool = False) -> str:
 
 
 # ---------------------------------------------------------------------------
-# SharePoint / Excel
+# Register Excel (Google Sheets / SharePoint)
 # ---------------------------------------------------------------------------
 
 _REGISTER_CACHE_NAME = "register_latest.xlsx"
 _REGISTER_ORIGINAL_NAME_FILE = "register_original_name.txt"
 _EXCEL_SUFFIXES = (".xlsx", ".xls", ".xlsm")
+_GOOGLE_SHEETS_ID_RE = re.compile(
+    r"https?://docs\.google\.com/spreadsheets/d/([a-zA-Z0-9-_]+)",
+    re.IGNORECASE,
+)
+
+
+def _google_sheets_gid_from_url(url: str) -> str | None:
+    """從 Google Sheets URL 的 query 或 fragment 取出 gid。"""
+    parsed = urlparse(url or "")
+    qs = parse_qs(parsed.query)
+    gid_vals = qs.get("gid") or []
+    if gid_vals and str(gid_vals[0]).strip():
+        return str(gid_vals[0]).strip()
+    if parsed.fragment:
+        m = re.search(r"(?:^|#|&)gid=(\d+)", parsed.fragment)
+        if m:
+            return m.group(1)
+    return None
+
+
+def resolve_register_download_url(url: str) -> str:
+    """將 register 來源 URL 解析為可下載的 xlsx URL。
+
+    - docs.google.com/spreadsheets：edit/view → export?format=xlsx（優先保留 gid）
+    - 已是 export URL：確保 format=xlsx，其餘 query 保留
+    - SharePoint download.aspx 等：原樣回傳
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return raw
+    m = _GOOGLE_SHEETS_ID_RE.search(raw)
+    if not m:
+        return raw
+
+    sheet_id = m.group(1)
+    parsed = urlparse(raw)
+    path_lower = (parsed.path or "").lower()
+    gid = _google_sheets_gid_from_url(raw)
+
+    if "/export" in path_lower:
+        qs = parse_qs(parsed.query, keep_blank_values=True)
+        flat: dict[str, str] = {
+            k: (v[-1] if isinstance(v, list) and v else "")
+            for k, v in qs.items()
+        }
+        flat["format"] = "xlsx"
+        if gid is not None:
+            flat["gid"] = gid
+        return urlunparse(
+            (
+                parsed.scheme or "https",
+                parsed.netloc or "docs.google.com",
+                parsed.path,
+                "",
+                urlencode(flat),
+                "",
+            )
+        )
+
+    export = (
+        f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+    )
+    if gid is not None:
+        export += f"&gid={gid}"
+    return export
 
 
 def parse_content_disposition_filename(header: str) -> str | None:
@@ -1434,7 +1499,7 @@ def build_diff_email_subject(
 
 
 def resolve_local_xlsx_override() -> Path | None:
-    """環境變數 SYNC_LOCAL_XLSX：改讀本機 Excel（跳過 SharePoint 下載）。"""
+    """環境變數 SYNC_LOCAL_XLSX：改讀本機 Excel（跳過遠端下載）。"""
     raw = (os.environ.get("SYNC_LOCAL_XLSX") or "").strip().strip('"')
     if not raw:
         return None
@@ -1445,8 +1510,10 @@ def resolve_local_xlsx_override() -> Path | None:
 
 
 def download_sharepoint_excel(url: str, cache_dir: Path) -> tuple[Path, str]:
-    """下載至 register_latest.xlsx；回傳 (path, 原始檔名 basename)。
+    """下載 register 至 register_latest.xlsx；回傳 (path, 原始檔名 basename)。
 
+    支援 Google Sheets export 與 SharePoint download.aspx。
+    若 URL 為 Google Sheets edit/view，會先轉成 export xlsx。
     原始檔名優先取自 Content-Disposition（filename / filename*），否則 URL。
     同時寫入 cache_dir/register_original_name.txt（若有解析到）。
 
@@ -1468,12 +1535,31 @@ def download_sharepoint_excel(url: str, cache_dir: Path) -> tuple[Path, str]:
         print(f"S 表原始檔名: {original}")
         return dest, original
 
-    resp = requests.get(url, timeout=120, allow_redirects=True)
+    download_url = resolve_register_download_url(url)
+    if download_url != (url or "").strip():
+        print(f"Register 下載 URL 已解析: {download_url}")
+
+    resp = requests.get(download_url, timeout=120, allow_redirects=True)
+    if resp.status_code in (401, 403) and "docs.google.com" in download_url:
+        raise RuntimeError(
+            f"Google Sheets 下載被拒 (HTTP {resp.status_code})。"
+            "請將試算表設為「知道連結的任何人」可檢視"
+            "（Anyone with the link can view），再重試。"
+            f" URL: {download_url}"
+        )
     resp.raise_for_status()
     if len(resp.content) < 1000:
         raise RuntimeError("下載的檔案過小，可能不是有效的 xlsx。")
+    # Google 未公開時有時仍回 200 + HTML 登入頁
+    content_type = (resp.headers.get("Content-Type") or "").lower()
+    if "html" in content_type and resp.content[:2] != b"PK":
+        raise RuntimeError(
+            "下載結果是 HTML 而非 xlsx（多半尚未公開分享）。"
+            "請將 Google Sheet 設為「知道連結的任何人」可檢視後重試。"
+            f" URL: {download_url}"
+        )
     dest.write_bytes(resp.content)
-    original = extract_download_original_filename(resp, url)
+    original = extract_download_original_filename(resp, download_url)
     if original:
         name_file.write_text(original, encoding="utf-8")
         print(f"S 表原始檔名: {original}")
@@ -1483,6 +1569,10 @@ def download_sharepoint_excel(url: str, cache_dir: Path) -> tuple[Path, str]:
             original = cached
             print(f"S 表原始檔名（快取）: {original}")
     return dest, original
+
+
+# 相容別名：Google Sheets / SharePoint 皆可
+download_register_excel = download_sharepoint_excel
 
 
 def _cell_column_letter(cell: Any) -> str | None:
@@ -1548,9 +1638,18 @@ def load_register_rows_from_excel(
     xlsx_path: Path, sheet_name: str
 ) -> tuple[list[str], list[RegisterRow]]:
     wb = load_workbook(xlsx_path, read_only=True, data_only=True)
-    if sheet_name not in wb.sheetnames:
-        raise RuntimeError(f"找不到工作表 {sheet_name!r}，現有：{wb.sheetnames}")
-    ws = wb[sheet_name]
+    names = list(wb.sheetnames)
+    chosen = (sheet_name or "").strip()
+    if chosen not in names:
+        if not names:
+            wb.close()
+            raise RuntimeError(f"Excel 沒有工作表: {xlsx_path}")
+        chosen = names[0]
+        print(
+            f"警告: 找不到工作表 {sheet_name!r}，改用第一張 {chosen!r}"
+            f"（現有：{names}）"
+        )
+    ws = wb[chosen]
     rows_iter = ws.iter_rows()
     header_cells = next(rows_iter, None)
     if not header_cells:
@@ -1826,7 +1925,11 @@ def _title_looks_corrupted(text: str) -> bool:
 
 
 def resolve_sharepoint_source_link(cfg: dict[str, Any]) -> tuple[str, str]:
-    """回傳 Confluence 頁首 S 表連結 (url, title)。"""
+    """回傳 Confluence 頁首 S 表連結 (url, title)。
+
+    優先 confluence.source_link_url，其次 sharepoint.view_url
+    （Google Sheets edit URL 或 SharePoint 瀏覽連結），再退回 download_url。
+    """
     conf = cfg.get("confluence", {})
     sp = cfg.get("sharepoint", {})
     url = (
@@ -2705,9 +2808,11 @@ def run_sync(config_path: Path, dry_run: bool) -> SyncReport:
     # 下載前讀取上次檔名，供郵件主旨顯示改名過渡（下載會覆寫 register_original_name.txt）
     s_previous_filename = read_cached_register_original_name(cache_dir)
 
-    xlsx, s_original_filename = download_sharepoint_excel(
-        cfg["sharepoint"]["download_url"], cache_dir
-    )
+    sp = cfg.get("sharepoint") or {}
+    register_url = (sp.get("download_url") or sp.get("view_url") or "").strip()
+    if not register_url:
+        raise SystemExit("config sharepoint.download_url / view_url 未設定")
+    xlsx, s_original_filename = download_sharepoint_excel(register_url, cache_dir)
     print(f"已下載 S 表格: {xlsx} ({xlsx.stat().st_size} bytes)")
     subject_preview = resolve_register_subject_token(
         s_original_filename,
@@ -2717,7 +2822,8 @@ def run_sync(config_path: Path, dry_run: bool) -> SyncReport:
     if subject_preview:
         print(f"郵件主旨括號: [{subject_preview}]")
 
-    s_columns, s_rows = load_register_rows_from_excel(xlsx, cfg["sharepoint"]["sheet_name"])
+    sheet_name = str(sp.get("sheet_name") or "Register")
+    s_columns, s_rows = load_register_rows_from_excel(xlsx, sheet_name)
     print(f"S 表格欄位 ({len(s_columns)}): {', '.join(s_columns)}")
     print(f"S 表格有效項目: {len(s_rows)}")
     if not s_rows:
@@ -2824,7 +2930,7 @@ def run_sync(config_path: Path, dry_run: bool) -> SyncReport:
         page_id,
         cfg["confluence"].get("page_title", page.get("title", "mail_checking")),
         page_body,
-        cfg["confluence"].get("version_message", "Synced from SharePoint register"),
+        cfg["confluence"].get("version_message", "Synced from register"),
         dry_run,
     )
 
@@ -2875,7 +2981,7 @@ def print_report(report: SyncReport) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="SharePoint Register -> Confluence -> Jira 同步"
+        description="Register (Google Sheets/SharePoint) -> Confluence -> Jira 同步"
     )
     parser.add_argument(
         "--config",

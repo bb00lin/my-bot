@@ -28,18 +28,20 @@ notify:
   # graph_mailbox: "user@company.com"  # 可選；否則用 MAIL_USERNAME
 
 sharepoint:
-  # Sync 腳本下載 Excel 用（必須是 download.aspx）
-  download_url: "https://qsitw-my.sharepoint.com/:x:/r/personal/challo_chen_qsitw_com/_layouts/15/download.aspx?share=IQAyqQjNe2bmSp28QrFpnf_sAbL5gqBzp6h3RSCwPKx2cbY"
-  # Confluence 頁首 S 表連結：瀏覽器開啟網頁版（由 share token 轉成 :x:/g/personal/... 形式）
-  view_url: "https://qsitw-my.sharepoint.com/:x:/g/personal/challo_chen_qsitw_com/IQAyqQjNe2bmSp28QrFpnf_sAbL5gqBzp6h3RSCwPKx2cbY"
+  # S 表來源（Google Sheets 或 SharePoint 皆可；鍵名仍用 sharepoint 以相容既有設定）
+  # Sync 下載：Google export xlsx（edit URL 也會自動轉成 export）；SharePoint 則用 download.aspx
+  download_url: "https://docs.google.com/spreadsheets/d/1NN97e43_HcFjoNFNuJEMbVr-5J2DJO6kMf--8paiY4g/export?format=xlsx&gid=0"
+  # Confluence 頁首 S 表連結：瀏覽器開啟網頁版（Google edit URL）
+  view_url: "https://docs.google.com/spreadsheets/d/1NN97e43_HcFjoNFNuJEMbVr-5J2DJO6kMf--8paiY4g/edit?gid=0#gid=0"
+  # 若找不到此名稱，腳本會改用第一張工作表
   sheet_name: "Register"
   # 可選：若下載 header 抓不到檔名，郵件主旨 [bracket] 可退回此值（含或不含 .xlsx）
-  # register_filename: "C27_VOX-QSI_Open_Issues_Register_20260702.xlsx"
+  # register_filename: "Open Issues Register.xlsx"
 
 confluence:
   page_id: "189300768"
   page_title: "mail_checking"
-  version_message: "Synced from SharePoint register"
+  version_message: "Synced from register"
   # 頁首 S 表連結顯示名稱（須 UTF-8；設定 CONFIG_YAML secret 時勿用會破壞中文的編碼）
   source_link_title: "C27 Open Issues Register (S 表格)"
   # source_link_url 可覆寫；未設時依序用 sharepoint.view_url → download_url

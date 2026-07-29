@@ -1,6 +1,6 @@
 # Register 同步工具
 
-SharePoint Excel（**S 表格**）→ Confluence `mail_checking`（**C 表格**）→ Jira PMWC 的三向同步腳本。
+SharePoint Excel / Google Sheets（**S 表格**）→ Confluence `mail_checking`（**C 表格**）→ Jira PMWC 的三向同步腳本。
 
 ## 資料流
 
@@ -110,7 +110,8 @@ copy .env.example .env
 
 2. 編輯 `config.yaml`：
    - `atlassian.email`：你的 Atlassian 帳號
-   - `sharepoint.download_url`：SharePoint 分享下載連結
+   - `sharepoint.download_url`：Google Sheets export xlsx 或 SharePoint `download.aspx`（edit URL 會自動轉 export）
+   - `sharepoint.view_url`：Confluence 頁首連結（建議 Google Sheets edit URL）
 
 3. 編輯 `.env`：
 
@@ -261,7 +262,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_windows_schedule.ps1
 
 - **找不到 config.yaml**：複製 `config.example.yaml`
 - **缺少 ATLASSIAN_API_TOKEN**：在 `.env` 設定
-- **SharePoint 下載失敗**：確認分享連結仍有效、可公開下載
+- **Register 下載失敗**：Google Sheet 需設「知道連結的任何人可檢視」；SharePoint 確認分享連結仍有效
 - **Jira 狀態轉換失敗**：檢查目標狀態名稱是否與 PMWC 專案一致
 - **Timeline 沒顯示**：確認 Opened 或 Target close 有值，且 Jira Timeline 檢視已啟用
 - **LINK 欄位空白**：確認已執行正式同步（非 `--dry-run`）；Closed 項目也會建立 Jira 並設為「完成」
