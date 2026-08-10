@@ -116,6 +116,9 @@ def conf_unique_img_name(issue_key, jira_filename):
 def queue_worklog_image(issue_key, jira_filename):
     if not issue_key or not jira_filename:
         return None
+    # 非圖片不排程上傳／嵌入，避免 Confluence 顯示「損壞的影像」
+    if not is_image_filename(jira_filename):
+        return None
     conf_name = conf_unique_img_name(issue_key, jira_filename)
     entry = {
         "issue_key": issue_key,
@@ -190,6 +193,10 @@ def append_wysiwyg_comment(
     comment_span = soup.new_tag("span", style=color_style or "color: #555555;")
 
     def _append_image(container, jira_fn):
+        # 備註 [[IMG:]] 若指向非圖片，改顯示檔名，避免 Confluence「損壞的影像」
+        if not is_image_filename(jira_fn):
+            container.append(soup.new_string(f"📎 {os.path.basename(str(jira_fn).strip())}"))
+            return
         conf_fn = queue_worklog_image(issue_key, jira_fn) if issue_key else None
         if conf_fn:
             img = soup.new_tag("ac:image", **{"ac:width": "640"})
@@ -257,12 +264,15 @@ def append_wysiwyg_comment(
 
     parent_tag.append(comment_span)
 
+# 僅副檔名白名單可當圖片嵌入；不採信 mime（Jira 偶發把 .brd/.dxf 標成 image/*）
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
+
+def is_image_filename(name):
+    n = (name or "").lower()
+    return any(n.endswith(ext) for ext in IMAGE_EXTS)
+
 def is_image_attachment(att):
-    mime = (att.get("mimeType") or "").lower()
-    name = (att.get("filename") or "").lower()
-    if mime.startswith("image/"):
-        return True
-    return any(name.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"))
+    return is_image_filename((att or {}).get("filename") or "")
 
 def attachment_created_date_tz8(att):
     created = att.get("created") or ""
@@ -271,8 +281,8 @@ def attachment_created_date_tz8(att):
         return dt.strftime("%Y-%m-%d")
     return created[:10] if created else ""
 
-def list_day_image_filenames(issue_obj_or_atts, day_str, exclude_names=None):
-    """依附件建立日期（台北）篩出該日圖片檔名；exclude 避免與 [[IMG:]] 重複。"""
+def _iter_day_attachments(issue_obj_or_atts, day_str, exclude_names=None):
+    """依附件建立日期（台北）列出當日附件；exclude 避免與 [[IMG:]] 重複。"""
     exclude = {n.lower() for n in (exclude_names or [])}
     if isinstance(issue_obj_or_atts, dict) and "fields" in issue_obj_or_atts:
         attachments = (issue_obj_or_atts.get("fields") or {}).get("attachment") or []
@@ -280,23 +290,34 @@ def list_day_image_filenames(issue_obj_or_atts, day_str, exclude_names=None):
         attachments = issue_obj_or_atts
     else:
         attachments = []
-    result = []
     for att in attachments:
-        if not is_image_attachment(att):
-            continue
         fn = att.get("filename") or ""
         if not fn or fn.lower() in exclude:
             continue
-        if attachment_created_date_tz8(att) == day_str:
-            result.append(fn)
-            exclude.add(fn.lower())
-    return result
+        if attachment_created_date_tz8(att) != day_str:
+            continue
+        yield att, fn
+        exclude.add(fn.lower())
+
+def list_day_image_filenames(issue_obj_or_atts, day_str, exclude_names=None):
+    """篩出該日圖片檔名。"""
+    return [
+        fn for att, fn in _iter_day_attachments(issue_obj_or_atts, day_str, exclude_names)
+        if is_image_attachment(att)
+    ]
+
+def list_day_file_filenames(issue_obj_or_atts, day_str, exclude_names=None):
+    """篩出該日非圖片附件檔名（報告中改顯示文字，不嵌入影像）。"""
+    return [
+        fn for att, fn in _iter_day_attachments(issue_obj_or_atts, day_str, exclude_names)
+        if not is_image_attachment(att)
+    ]
 
 def append_day_attachment_images(
     soup, parent_tag, issue_key, filenames, color_style="", bg_color="#ffffff",
     hang_prefix="└ 📝 ", left_gutter="--------",
 ):
-    """把指定檔名圖片接在備註後方（延續同縮排）。"""
+    """把指定檔名接在備註後方：圖片嵌入，非圖片只顯示檔名。"""
     if not issue_key or not filenames:
         return
     for fn in filenames:
@@ -304,6 +325,11 @@ def append_day_attachment_images(
         spacer = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
         spacer.string = _invisible_hang_indent(left_gutter, hang_prefix)
         parent_tag.append(spacer)
+        if not is_image_filename(fn):
+            span = soup.new_tag("span", style=color_style or "color: #555555;")
+            span.string = f"📎 {fn}"
+            parent_tag.append(span)
+            continue
         conf_fn = queue_worklog_image(issue_key, fn)
         if conf_fn:
             img = soup.new_tag("ac:image", **{"ac:width": "640"})
@@ -348,6 +374,9 @@ def upload_pending_images_to_confluence(page_id):
                 print(f"  ⚠️ 下載失敗 {jira_fn}: {bin_res.status_code}")
                 continue
             mime = matched.get("mimeType") or "application/octet-stream"
+            if not is_image_filename(jira_fn):
+                print(f"  ⏭️ 略過非圖片附件 {jira_fn}")
+                continue
             files = {"file": (conf_fn, bin_res.content, mime)}
             up = requests.post(attach_url, auth=ADMIN_AUTH, headers=headers, files=files, timeout=60)
             if up.status_code in (200, 201):
@@ -906,10 +935,14 @@ def enrich_with_weekly_data(base_logs, name, email, account_id, days_to_process,
             joined_comment = " / \n".join(unique_comments) if unique_comments else ""
             exclude_imgs = [m.strip() for m in IMG_MARKER_RE.findall(joined_comment)]
             day_images = list_day_image_filenames(issue_obj, day_str, exclude_names=exclude_imgs)
+            day_files = list_day_file_filenames(
+                issue_obj, day_str, exclude_names=exclude_imgs + day_images
+            )
+            day_attachments = day_images + day_files
             
-            has_log = bool(wls or trans or day_images)
+            has_log = bool(wls or trans or day_attachments)
             if SETTINGS.get("hide_status_only"):
-                if total_mins_day == 0 and not joined_comment.strip() and not day_images:
+                if total_mins_day == 0 and not joined_comment.strip() and not day_attachments:
                     has_log = False
                     
             if has_log: has_week_log = True
@@ -917,7 +950,7 @@ def enrich_with_weekly_data(base_logs, name, email, account_id, days_to_process,
             daily_days.append({
                 "date": target_date, "day_name": day_name, "day_short": day_short, "dur_str": dur_str,
                 "total_mins_day": total_mins_day, "comment": joined_comment, "transition": trans, "has_log": has_log,
-                "day_images": day_images,
+                "day_images": day_attachments,
             })
         
         if not has_week_log: continue
@@ -1131,7 +1164,9 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                         auth=ADMIN_AUTH, timeout=15,
                     )
                     atts = iss_res.json().get("fields", {}).get("attachment", []) if iss_res.status_code == 200 else []
-                    day_imgs = list_day_image_filenames(atts, day_str, exclude_names=exclude_imgs)
+                    imgs = list_day_image_filenames(atts, day_str, exclude_names=exclude_imgs)
+                    files = list_day_file_filenames(atts, day_str, exclude_names=exclude_imgs + imgs)
+                    day_imgs = imgs + files
                 except Exception:
                     day_imgs = []
             append_day_attachment_images(
@@ -1398,7 +1433,10 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                     elif d_info.get('transition'):
                         comment_text = "(僅狀態改變)"
                     elif day_imgs:
-                        comment_text = "(附件圖片)"
+                        if all(is_image_filename(fn) for fn in day_imgs):
+                            comment_text = "(附件圖片)"
+                        else:
+                            comment_text = "(附件)"
                     else:
                         comment_text = "(無紀錄)"
                     comment_span = soup.new_tag("span", style=color_style)
