@@ -212,7 +212,11 @@ def append_wysiwyg_comment(
                     meta = None
             container.append(
                 make_attachment_link_tag(
-                    soup, display, meta, color_style=color_style or "color: #555555;"
+                    soup,
+                    display,
+                    meta,
+                    color_style=color_style or "color: #555555;",
+                    issue_key=issue_key,
                 )
             )
             return
@@ -331,23 +335,23 @@ def get_cached_attachment_meta(issue_key, filename):
         return None
     return (_ISSUE_ATTACHMENT_CACHE.get(issue_key) or {}).get(filename.lower())
 
-def jira_attachment_browser_url(meta):
-    """瀏覽器可開預覽的 Jira 附件 URL（沿用登入 session）。"""
-    if not meta:
+def jira_attachment_browser_url(meta, issue_key=None):
+    """開 Jira issue browse 並帶附件預覽參數（勿用 /secure/attachment，會強制下載）。"""
+    if not issue_key:
         return None
-    att_id = meta.get("id")
-    fn = meta.get("filename") or ""
+    browse = f"{JIRA_URL}/browse/{issue_key}"
+    att_id = (meta or {}).get("id")
+    fn = (meta or {}).get("filename") or ""
     if att_id and fn:
-        return f"{JIRA_URL}/secure/attachment/{att_id}/{quote(fn)}"
-    content = meta.get("content")
-    if content:
-        return content
-    return None
+        return f"{browse}?attachmentId={att_id}&attachmentFileName={quote(fn)}"
+    if att_id:
+        return f"{browse}?attachmentId={att_id}"
+    return browse
 
-def make_attachment_link_tag(soup, filename, meta=None, color_style=""):
-    """非圖片附件：輸出可點擊 <a>（新分頁開 Jira 預覽）。"""
+def make_attachment_link_tag(soup, filename, meta=None, color_style="", issue_key=None):
+    """非圖片附件：輸出可點擊 <a>（新分頁開 Jira issue 附件預覽）。"""
     display = f"📎 {filename}"
-    href = jira_attachment_browser_url(meta)
+    href = jira_attachment_browser_url(meta, issue_key=issue_key)
     style = color_style or "color: #555555;"
     if href:
         a_tag = soup.new_tag(
@@ -421,7 +425,11 @@ def append_day_attachment_images(
         if not is_image_filename(fn):
             parent_tag.append(
                 make_attachment_link_tag(
-                    soup, fn, meta=meta, color_style=color_style or "color: #555555;"
+                    soup,
+                    fn,
+                    meta=meta,
+                    color_style=color_style or "color: #555555;",
+                    issue_key=issue_key,
                 )
             )
             continue
