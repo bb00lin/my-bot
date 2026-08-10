@@ -6,7 +6,7 @@ import sys
 import time
 from datetime import datetime, timezone, timedelta
 from requests.auth import HTTPBasicAuth
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 from bs4 import BeautifulSoup, Tag, NavigableString
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
@@ -193,9 +193,28 @@ def append_wysiwyg_comment(
     comment_span = soup.new_tag("span", style=color_style or "color: #555555;")
 
     def _append_image(container, jira_fn):
-        # 備註 [[IMG:]] 若指向非圖片，改顯示檔名，避免 Confluence「損壞的影像」
+        # 備註 [[IMG:]] 若指向非圖片，改顯示可點開的 Jira 附件連結（避免「損壞的影像」）
         if not is_image_filename(jira_fn):
-            container.append(soup.new_string(f"📎 {os.path.basename(str(jira_fn).strip())}"))
+            display = os.path.basename(str(jira_fn).strip())
+            meta = get_cached_attachment_meta(issue_key, display) if issue_key else None
+            if not meta and issue_key:
+                # 快取未命中時補抓一次附件清單
+                try:
+                    iss_res = requests.get(
+                        f"{JIRA_URL}/rest/api/2/issue/{issue_key}?fields=attachment",
+                        auth=ADMIN_AUTH, timeout=15,
+                    )
+                    if iss_res.status_code == 200:
+                        atts = (iss_res.json().get("fields") or {}).get("attachment") or []
+                        cache_issue_attachments(issue_key, atts)
+                        meta = get_cached_attachment_meta(issue_key, display)
+                except Exception:
+                    meta = None
+            container.append(
+                make_attachment_link_tag(
+                    soup, display, meta, color_style=color_style or "color: #555555;"
+                )
+            )
             return
         conf_fn = queue_worklog_image(issue_key, jira_fn) if issue_key else None
         if conf_fn:
@@ -281,15 +300,80 @@ def attachment_created_date_tz8(att):
         return dt.strftime("%Y-%m-%d")
     return created[:10] if created else ""
 
-def _iter_day_attachments(issue_obj_or_atts, day_str, exclude_names=None):
+# issue_key -> {filename_lower: {filename, id, content}}
+_ISSUE_ATTACHMENT_CACHE = {}
+
+def attachment_entry_filename(item):
+    """day_images 可能是檔名字串或非圖片 metadata dict。"""
+    if isinstance(item, dict):
+        return item.get("filename") or ""
+    return item or ""
+
+def attachment_meta_from_att(att):
+    if not att:
+        return None
+    fn = att.get("filename") or ""
+    if not fn:
+        return None
+    return {"filename": fn, "id": att.get("id"), "content": att.get("content")}
+
+def cache_issue_attachments(issue_key, attachments):
+    if not issue_key:
+        return
+    bucket = _ISSUE_ATTACHMENT_CACHE.setdefault(issue_key, {})
+    for att in attachments or []:
+        meta = attachment_meta_from_att(att)
+        if meta:
+            bucket[meta["filename"].lower()] = meta
+
+def get_cached_attachment_meta(issue_key, filename):
+    if not issue_key or not filename:
+        return None
+    return (_ISSUE_ATTACHMENT_CACHE.get(issue_key) or {}).get(filename.lower())
+
+def jira_attachment_browser_url(meta):
+    """瀏覽器可開預覽的 Jira 附件 URL（沿用登入 session）。"""
+    if not meta:
+        return None
+    att_id = meta.get("id")
+    fn = meta.get("filename") or ""
+    if att_id and fn:
+        return f"{JIRA_URL}/secure/attachment/{att_id}/{quote(fn)}"
+    content = meta.get("content")
+    if content:
+        return content
+    return None
+
+def make_attachment_link_tag(soup, filename, meta=None, color_style=""):
+    """非圖片附件：輸出可點擊 <a>（新分頁開 Jira 預覽）。"""
+    display = f"📎 {filename}"
+    href = jira_attachment_browser_url(meta)
+    style = color_style or "color: #555555;"
+    if href:
+        a_tag = soup.new_tag(
+            "a",
+            href=href,
+            target="_blank",
+            rel="noopener noreferrer",
+            style=f"{style} text-decoration: underline;",
+        )
+        a_tag.string = display
+        return a_tag
+    span = soup.new_tag("span", style=style)
+    span.string = display
+    return span
+
+def _iter_day_attachments(issue_obj_or_atts, day_str, exclude_names=None, issue_key=None):
     """依附件建立日期（台北）列出當日附件；exclude 避免與 [[IMG:]] 重複。"""
     exclude = {n.lower() for n in (exclude_names or [])}
     if isinstance(issue_obj_or_atts, dict) and "fields" in issue_obj_or_atts:
         attachments = (issue_obj_or_atts.get("fields") or {}).get("attachment") or []
+        issue_key = issue_key or issue_obj_or_atts.get("key")
     elif isinstance(issue_obj_or_atts, list):
         attachments = issue_obj_or_atts
     else:
         attachments = []
+    cache_issue_attachments(issue_key, attachments)
     for att in attachments:
         fn = att.get("filename") or ""
         if not fn or fn.lower() in exclude:
@@ -299,36 +383,47 @@ def _iter_day_attachments(issue_obj_or_atts, day_str, exclude_names=None):
         yield att, fn
         exclude.add(fn.lower())
 
-def list_day_image_filenames(issue_obj_or_atts, day_str, exclude_names=None):
+def list_day_image_filenames(issue_obj_or_atts, day_str, exclude_names=None, issue_key=None):
     """篩出該日圖片檔名。"""
     return [
-        fn for att, fn in _iter_day_attachments(issue_obj_or_atts, day_str, exclude_names)
+        fn for att, fn in _iter_day_attachments(
+            issue_obj_or_atts, day_str, exclude_names, issue_key=issue_key
+        )
         if is_image_attachment(att)
     ]
 
-def list_day_file_filenames(issue_obj_or_atts, day_str, exclude_names=None):
-    """篩出該日非圖片附件檔名（報告中改顯示文字，不嵌入影像）。"""
+def list_day_file_filenames(issue_obj_or_atts, day_str, exclude_names=None, issue_key=None):
+    """篩出該日非圖片附件 metadata（報告中顯示可點連結，不嵌入影像）。"""
     return [
-        fn for att, fn in _iter_day_attachments(issue_obj_or_atts, day_str, exclude_names)
-        if not is_image_attachment(att)
+        attachment_meta_from_att(att)
+        for att, fn in _iter_day_attachments(
+            issue_obj_or_atts, day_str, exclude_names, issue_key=issue_key
+        )
+        if not is_image_attachment(att) and attachment_meta_from_att(att)
     ]
 
 def append_day_attachment_images(
     soup, parent_tag, issue_key, filenames, color_style="", bg_color="#ffffff",
     hang_prefix="└ 📝 ", left_gutter="--------",
 ):
-    """把指定檔名接在備註後方：圖片嵌入，非圖片只顯示檔名。"""
+    """把指定附件接在備註後方：圖片嵌入，非圖片顯示可點開的 Jira 附件連結。"""
     if not issue_key or not filenames:
         return
-    for fn in filenames:
+    for item in filenames:
+        fn = attachment_entry_filename(item)
+        if not fn:
+            continue
+        meta = item if isinstance(item, dict) else get_cached_attachment_meta(issue_key, fn)
         parent_tag.append(soup.new_tag("br"))
         spacer = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
         spacer.string = _invisible_hang_indent(left_gutter, hang_prefix)
         parent_tag.append(spacer)
         if not is_image_filename(fn):
-            span = soup.new_tag("span", style=color_style or "color: #555555;")
-            span.string = f"📎 {fn}"
-            parent_tag.append(span)
+            parent_tag.append(
+                make_attachment_link_tag(
+                    soup, fn, meta=meta, color_style=color_style or "color: #555555;"
+                )
+            )
             continue
         conf_fn = queue_worklog_image(issue_key, fn)
         if conf_fn:
@@ -934,9 +1029,14 @@ def enrich_with_weekly_data(base_logs, name, email, account_id, days_to_process,
             
             joined_comment = " / \n".join(unique_comments) if unique_comments else ""
             exclude_imgs = [m.strip() for m in IMG_MARKER_RE.findall(joined_comment)]
-            day_images = list_day_image_filenames(issue_obj, day_str, exclude_names=exclude_imgs)
+            day_images = list_day_image_filenames(
+                issue_obj, day_str, exclude_names=exclude_imgs, issue_key=issue_obj.get("key")
+            )
             day_files = list_day_file_filenames(
-                issue_obj, day_str, exclude_names=exclude_imgs + day_images
+                issue_obj,
+                day_str,
+                exclude_names=exclude_imgs + day_images,
+                issue_key=issue_obj.get("key"),
             )
             day_attachments = day_images + day_files
             
@@ -1164,8 +1264,16 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                         auth=ADMIN_AUTH, timeout=15,
                     )
                     atts = iss_res.json().get("fields", {}).get("attachment", []) if iss_res.status_code == 200 else []
-                    imgs = list_day_image_filenames(atts, day_str, exclude_names=exclude_imgs)
-                    files = list_day_file_filenames(atts, day_str, exclude_names=exclude_imgs + imgs)
+                    cache_issue_attachments(log.get("key"), atts)
+                    imgs = list_day_image_filenames(
+                        atts, day_str, exclude_names=exclude_imgs, issue_key=log.get("key")
+                    )
+                    files = list_day_file_filenames(
+                        atts,
+                        day_str,
+                        exclude_names=exclude_imgs + imgs,
+                        issue_key=log.get("key"),
+                    )
                     day_imgs = imgs + files
                 except Exception:
                     day_imgs = []
@@ -1433,7 +1541,7 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                     elif d_info.get('transition'):
                         comment_text = "(僅狀態改變)"
                     elif day_imgs:
-                        if all(is_image_filename(fn) for fn in day_imgs):
+                        if all(is_image_filename(attachment_entry_filename(fn)) for fn in day_imgs):
                             comment_text = "(附件圖片)"
                         else:
                             comment_text = "(附件)"
@@ -1754,7 +1862,11 @@ def run_sync_logic():
         print(f"\n=========================================\n🎯 目標週報頁面: {target_title}\n=========================================\n")
         
         print(f"🔍 正在 Confluence 搜尋頁面...")
-        res = requests.get(api_endpoint, params={"title": target_title, "expand": "body.storage,version"}, auth=ADMIN_AUTH)
+        res = requests.get(
+            api_endpoint,
+            params={"title": target_title, "expand": "body.storage,version,space"},
+            auth=ADMIN_AUTH,
+        )
         
         if res.status_code != 200:
             sync_status = "error"
@@ -1770,7 +1882,8 @@ def run_sync_logic():
         page_data = pages[0]
         page_id = page_data['id']
         # 完整 https URL（Gmail 純文字信件會自動變成可點連結）
-        page_url = f"{JIRA_URL}/wiki/pages/viewpage.action?pageId={page_id}"
+        space_key = (page_data.get("space") or {}).get("key") or "teamAioTHW"
+        page_url = f"{JIRA_URL}/wiki/spaces/{space_key}/pages/{page_id}/{quote(target_title, safe='')}"
         print(f"🔗 日報頁面: {page_url}")
         html_content = page_data['body']['storage']['value']
         soup = BeautifulSoup(html_content, 'html.parser')
