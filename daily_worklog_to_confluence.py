@@ -1769,6 +1769,9 @@ def run_sync_logic():
             
         page_data = pages[0]
         page_id = page_data['id']
+        # 完整 https URL（Gmail 純文字信件會自動變成可點連結）
+        page_url = f"{JIRA_URL}/wiki/pages/viewpage.action?pageId={page_id}"
+        print(f"🔗 日報頁面: {page_url}")
         html_content = page_data['body']['storage']['value']
         soup = BeautifulSoup(html_content, 'html.parser')
         
@@ -1986,9 +1989,14 @@ def run_sync_logic():
             }
             update_res = requests.put(url, json=payload, auth=ADMIN_AUTH, headers={"Content-Type": "application/json"})
             if update_res.status_code == 200:
-                page_url = f"{JIRA_URL}/wiki/pages/viewpage.action?pageId={page_id}"
-                sync_message = f"🎉 同步完成！\n本次共更新了 {total_logs_written} 筆任務紀錄至 Confluence。\n目標頁面：{target_title}\n網址連結：{page_url}"
+                sync_message = (
+                    f"🎉 同步完成！\n"
+                    f"本次共更新了 {total_logs_written} 筆任務紀錄至 Confluence。\n"
+                    f"目標頁面：{target_title}\n"
+                    f"🔗 日報頁面: {page_url}"
+                )
                 print(f"🎉 大功告成！已成功更新 {total_logs_written} 筆任務紀錄！")
+                print(f"🔗 日報頁面: {page_url}")
 
                 # ==========================================
                 # 🌟 歷史大清洗與逆向防洗版
@@ -2014,10 +2022,11 @@ def run_sync_logic():
                     print(f"✅ 歷史大清洗完畢！共成功拔成了 {cleared_count} 筆殘留的 Jira 週報連動紀錄。")
             else:
                 sync_status = "error"
-                sync_message = f"❌ 儲存至 Confluence 失敗。"
+                sync_message = f"❌ 儲存至 Confluence 失敗。\n🔗 日報頁面: {page_url}"
+                print(f"🔗 日報頁面: {page_url}")
         else:
             sync_status = "warning"
-            sync_message = "📭 執行完畢，沒有找到需要變動的紀錄。"
+            sync_message = f"📭 執行完畢，沒有找到需要變動的紀錄。\n🔗 日報頁面: {page_url}"
             print(f"\n{sync_message}")
 
     except Exception as e:
