@@ -1495,9 +1495,14 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
             spacer_meta = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
             spacer_meta.string = "----"
             p_meta.append(spacer_meta)
-            
+
+            is_target = d_info['date'].date() in [sd.date() for sd in selected_dates]
+            color_style = "color: #e74c3c; font-weight: bold;" if is_target else "color: #555555;"
+
             dur_text = f"({d_info['dur_str']}) " if d_info['dur_str'] else ""
-            p_meta.append(soup.new_string(f"{d_info['day_short']} {d_info['day_name']} {dur_text}"))
+            date_span = soup.new_tag("span", style=color_style)
+            date_span.string = f"{d_info['day_short']} {d_info['day_name']} {dur_text}"
+            p_meta.append(date_span)
 
             is_tbd = (log.get('duedate') == '"Due TBD"')
             if SETTINGS.get("show_duedate") and log.get('duedate') and not is_tbd and ("標題列" not in mode or "雙管" in mode):
@@ -1534,9 +1539,6 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                 spacer_comment = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
                 spacer_comment.string = "--------"
                 p_comment.append(spacer_comment)
-                
-                is_target = d_info['date'].date() in [sd.date() for sd in selected_dates]
-                color_style = "color: #e74c3c; font-weight: bold;" if is_target else "color: #555555;"
 
                 comment_prefix = "└ 📝 "
                 p_comment.append(soup.new_string(comment_prefix))
