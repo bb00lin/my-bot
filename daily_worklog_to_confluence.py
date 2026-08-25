@@ -108,6 +108,11 @@ SETTINGS = SettingsManager()
 # Worklog 圖片標記：GUI 寫入 [[IMG:檔名]]，同步到 Confluence 時嵌入
 IMG_MARKER_RE = re.compile(r'\[\[IMG:([^\]]+?)\]\]', re.IGNORECASE)
 PENDING_CONF_IMAGES = []  # {issue_key, jira_filename, conf_filename}
+_CURRENT_CONF_PAGE_ID = None  # run_sync_logic 解析週報頁後設定，供圖片連結用
+
+def set_current_conf_page_id(page_id):
+    global _CURRENT_CONF_PAGE_ID
+    _CURRENT_CONF_PAGE_ID = page_id or None
 
 def conf_unique_img_name(issue_key, jira_filename):
     safe = re.sub(r'[^\w.\-]+', '_', os.path.basename(jira_filename.strip()))
@@ -222,7 +227,9 @@ def append_wysiwyg_comment(
             return
         conf_fn = queue_worklog_image(issue_key, jira_fn) if issue_key else None
         if conf_fn:
-            container.append(make_confluence_image_tag(soup, conf_fn))
+            container.append(make_confluence_image_tag(
+                soup, conf_fn, issue_key=issue_key, jira_filename=jira_fn,
+            ))
         else:
             container.append(soup.new_string(f"[[IMG:{jira_fn}]]"))
 
@@ -364,17 +371,97 @@ def make_attachment_link_tag(soup, filename, meta=None, color_style="", issue_ke
     span.string = display
     return span
 
-def make_confluence_image_tag(soup, conf_filename, *, width=640, thumbnail=True):
-    """嵌入 Confluence 頁面附件圖片；thumbnail=True 時可點擊放大檢視原圖。"""
-    attrs = {}
-    if thumbnail:
-        attrs["ac:thumbnail"] = "true"
-    if width:
-        attrs["ac:width"] = str(width)
-    img = soup.new_tag("ac:image", **attrs)
+def confluence_attachment_full_url(page_id, filename):
+    if not page_id or not filename:
+        return None
+    return f"{JIRA_URL}/wiki/download/attachments/{page_id}/{quote(filename, safe='')}"
+
+def jira_image_full_url(issue_key, jira_filename):
+    """PNG/JPG 用 secure/attachment 通常可在新分頁直接顯示原圖。"""
+    meta = get_cached_attachment_meta(issue_key, jira_filename)
+    if not meta or not meta.get("id"):
+        return None
+    fn = meta.get("filename") or jira_filename
+    return f"{JIRA_URL}/secure/attachment/{meta['id']}/{quote(fn, safe='')}"
+
+def image_full_view_url(conf_filename, issue_key=None, jira_filename=None, page_id=None):
+    page_id = page_id or _CURRENT_CONF_PAGE_ID
+    if issue_key and jira_filename:
+        url = jira_image_full_url(issue_key, jira_filename)
+        if url:
+            return url
+    if page_id and conf_filename:
+        return confluence_attachment_full_url(page_id, conf_filename)
+    return None
+
+def make_confluence_image_tag(
+    soup, conf_filename, *, issue_key=None, jira_filename=None, width=640, page_id=None,
+):
+    """嵌入可點擊放大的圖片（HTML img+a；Cloud 上 ac:thumbnail 無法點擊）。"""
+    page_id = page_id or _CURRENT_CONF_PAGE_ID
+    full_url = image_full_view_url(
+        conf_filename, issue_key=issue_key, jira_filename=jira_filename, page_id=page_id,
+    )
+    inline_src = confluence_attachment_full_url(page_id, conf_filename) if page_id else None
+
+    wrapper = soup.new_tag("span")
+    if full_url and inline_src:
+        a_img = soup.new_tag(
+            "a",
+            href=full_url,
+            target="_blank",
+            rel="noopener noreferrer",
+            style="cursor: zoom-in; text-decoration: none;",
+        )
+        img_tag = soup.new_tag(
+            "img",
+            src=inline_src,
+            width=str(width),
+            style=f"max-width:{width}px; height:auto; border:1px solid #bdc3c7;",
+            alt=(jira_filename or conf_filename),
+        )
+        a_img.append(img_tag)
+        wrapper.append(a_img)
+        wrapper.append(soup.new_tag("br"))
+        a_zoom = soup.new_tag(
+            "a",
+            href=full_url,
+            target="_blank",
+            rel="noopener noreferrer",
+            style="color: #2980b9; font-size: 85%; text-decoration: underline;",
+        )
+        a_zoom.string = "🔍 點擊放大"
+        wrapper.append(a_zoom)
+        return wrapper
+
+    # 無 page_id 時退回 ac:image（僅內嵌，無法保證可點擊）
+    img = soup.new_tag("ac:image", **{"ac:width": str(width)})
     ri = soup.new_tag("ri:attachment", **{"ri:filename": conf_filename})
     img.append(ri)
-    return img
+    wrapper.append(img)
+    return wrapper
+
+def upgrade_ac_images_to_clickable(soup, page_id):
+    """將舊版 ac:image 轉成可點擊的 HTML img（儲存前保險掃描）。"""
+    if not page_id:
+        return
+    for ac_img in list(soup.find_all("ac:image")):
+        ri = ac_img.find("ri:attachment")
+        if not ri:
+            continue
+        conf_fn = ri.get("ri:filename") or ""
+        if not conf_fn or ac_img.find_parent("a"):
+            continue
+        # 從 wl_{KEY}_{name} 反推 issue_key
+        issue_key = None
+        m = re.match(r"^wl_([A-Z][A-Z0-9]+-\d+)_(.+)$", conf_fn, re.I)
+        jira_fn = m.group(2) if m else conf_fn
+        if m:
+            issue_key = m.group(1).upper()
+        new_block = make_confluence_image_tag(
+            soup, conf_fn, issue_key=issue_key, jira_filename=jira_fn, page_id=page_id,
+        )
+        ac_img.replace_with(new_block)
 
 def _iter_day_attachments(issue_obj_or_atts, day_str, exclude_names=None, issue_key=None):
     """依附件建立日期（台北）列出當日附件；exclude 避免與 [[IMG:]] 重複。"""
@@ -444,7 +531,9 @@ def append_day_attachment_images(
             continue
         conf_fn = queue_worklog_image(issue_key, fn)
         if conf_fn:
-            parent_tag.append(make_confluence_image_tag(soup, conf_fn))
+            parent_tag.append(make_confluence_image_tag(
+                soup, conf_fn, issue_key=issue_key, jira_filename=fn,
+            ))
         else:
             span = soup.new_tag("span", style=color_style or "color: #555555;")
             span.string = f"[[IMG:{fn}]]"
@@ -1897,6 +1986,7 @@ def run_sync_logic():
             
         page_data = pages[0]
         page_id = page_data['id']
+        set_current_conf_page_id(page_id)
         # 完整 https URL（Gmail 純文字信件會自動變成可點連結）
         space_key = (page_data.get("space") or {}).get("key") or "teamAioTHW"
         page_url = f"{JIRA_URL}/wiki/spaces/{space_key}/pages/{page_id}/{quote(target_title, safe='')}"
@@ -2108,6 +2198,7 @@ def run_sync_logic():
 
         if page_needs_update:
             print(f"\n💾 發現頁面有變動，正在將最終結果儲存至 Confluence...")
+            upgrade_ac_images_to_clickable(soup, page_id)
             upload_pending_images_to_confluence(page_id)
             url = f"{api_endpoint}/{page_id}"
             payload = {
