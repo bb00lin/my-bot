@@ -222,10 +222,7 @@ def append_wysiwyg_comment(
             return
         conf_fn = queue_worklog_image(issue_key, jira_fn) if issue_key else None
         if conf_fn:
-            img = soup.new_tag("ac:image", **{"ac:width": "640"})
-            ri = soup.new_tag("ri:attachment", **{"ri:filename": conf_fn})
-            img.append(ri)
-            container.append(img)
+            container.append(make_confluence_image_tag(soup, conf_fn))
         else:
             container.append(soup.new_string(f"[[IMG:{jira_fn}]]"))
 
@@ -367,6 +364,18 @@ def make_attachment_link_tag(soup, filename, meta=None, color_style="", issue_ke
     span.string = display
     return span
 
+def make_confluence_image_tag(soup, conf_filename, *, width=640, thumbnail=True):
+    """嵌入 Confluence 頁面附件圖片；thumbnail=True 時可點擊放大檢視原圖。"""
+    attrs = {}
+    if thumbnail:
+        attrs["ac:thumbnail"] = "true"
+    if width:
+        attrs["ac:width"] = str(width)
+    img = soup.new_tag("ac:image", **attrs)
+    ri = soup.new_tag("ri:attachment", **{"ri:filename": conf_filename})
+    img.append(ri)
+    return img
+
 def _iter_day_attachments(issue_obj_or_atts, day_str, exclude_names=None, issue_key=None):
     """依附件建立日期（台北）列出當日附件；exclude 避免與 [[IMG:]] 重複。"""
     exclude = {n.lower() for n in (exclude_names or [])}
@@ -435,10 +444,7 @@ def append_day_attachment_images(
             continue
         conf_fn = queue_worklog_image(issue_key, fn)
         if conf_fn:
-            img = soup.new_tag("ac:image", **{"ac:width": "640"})
-            ri = soup.new_tag("ri:attachment", **{"ri:filename": conf_fn})
-            img.append(ri)
-            parent_tag.append(img)
+            parent_tag.append(make_confluence_image_tag(soup, conf_fn))
         else:
             span = soup.new_tag("span", style=color_style or "color: #555555;")
             span.string = f"[[IMG:{fn}]]"
