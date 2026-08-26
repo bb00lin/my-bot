@@ -386,23 +386,24 @@ def image_full_view_url(conf_filename, issue_key=None, jira_filename=None, page_
             return url
     return None
 
-def _new_enlarge_anchor(soup, href, *, for_image=False):
+def _new_jira_issue_anchor(soup, href, *, wrap_image=False):
+    """一律開 Jira browse（新分頁）。成功條件是打開單據，不是 lightbox。"""
     attrs = {
         "href": href,
         "target": "_blank",
         "rel": "noopener noreferrer",
+        "title": "開啟 Jira 單據（可再點附件看原圖）",
     }
-    if for_image:
-        attrs["style"] = "cursor: zoom-in; text-decoration: none;"
-        attrs["title"] = "在 Jira 開啟附件"
+    if wrap_image:
+        attrs["style"] = "text-decoration: none;"
     else:
-        attrs["style"] = "color: #2980b9; font-size: 85%; text-decoration: underline;"
+        attrs["style"] = "color: #2980b9; text-decoration: underline;"
     return soup.new_tag("a", **attrs)
 
 def make_confluence_image_tag(
     soup, conf_filename, *, issue_key=None, jira_filename=None, width=640, page_id=None,
 ):
-    """縮圖與「點擊放大」都連到 Jira browse（非下載 URL）。"""
+    """縮圖下方必有可見文字連結，開 Jira issue 頁（非下載、非 lightbox）。"""
     page_id = page_id or _CURRENT_CONF_PAGE_ID
     href = image_full_view_url(
         conf_filename, issue_key=issue_key, jira_filename=jira_filename, page_id=page_id,
@@ -411,13 +412,13 @@ def make_confluence_image_tag(
 
     wrapper = soup.new_tag("span")
 
-    def _append_visible_enlarge():
+    def _append_visible_jira_link():
         if not href:
             return
         wrapper.append(soup.new_tag("br"))
-        a_zoom = _new_enlarge_anchor(soup, href, for_image=False)
-        a_zoom.string = "🔍 點擊放大"
-        wrapper.append(a_zoom)
+        a_open = _new_jira_issue_anchor(soup, href, wrap_image=False)
+        a_open.string = "🔍 在 Jira 開啟原圖"
+        wrapper.append(a_open)
 
     if inline_src:
         img_tag = soup.new_tag(
@@ -428,25 +429,24 @@ def make_confluence_image_tag(
             alt=(jira_filename or conf_filename),
         )
         if href:
-            a_img = _new_enlarge_anchor(soup, href, for_image=True)
+            a_img = _new_jira_issue_anchor(soup, href, wrap_image=True)
             a_img.append(img_tag)
             wrapper.append(a_img)
         else:
             wrapper.append(img_tag)
-        _append_visible_enlarge()
+        _append_visible_jira_link()
         return wrapper
 
-    # 無 page_id：仍用 ac:image 顯示，外層包 <a>，並保留可見放大文字
     img = soup.new_tag("ac:image", **{"ac:width": str(width)})
     ri = soup.new_tag("ri:attachment", **{"ri:filename": conf_filename})
     img.append(ri)
     if href:
-        a_img = _new_enlarge_anchor(soup, href, for_image=True)
+        a_img = _new_jira_issue_anchor(soup, href, wrap_image=True)
         a_img.append(img)
         wrapper.append(a_img)
-        _append_visible_enlarge()
     else:
         wrapper.append(img)
+    _append_visible_jira_link()
     return wrapper
 
 def upgrade_ac_images_to_clickable(soup, page_id):
