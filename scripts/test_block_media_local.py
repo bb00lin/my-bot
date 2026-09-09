@@ -232,6 +232,130 @@ check([c["id"] for c in picked] == ["1", "2"],
       f"[案例3] 留言篩選錯誤（應為 ['1','2']，含 visibility 與 updated 過濾），實得 {[c['id'] for c in picked]}")
 
 
+# ============================================================
+hr("案例 4：PBY-11 2026-09-09 真實備註（12 個標記 + 未標記當日附件）")
+# ============================================================
+# 這筆備註同時含 Jira 連結語法 [url|url]（pipe 是 newline_chars 分隔符）與連續標記，
+# 是實測會讓人誤以為「圖片被搬到最後」的原文；未標記的當日附件才會被接在備註後面。
+PBY11_COMMENT = """Slice I/O design
+
+Spring Fingers
+[[IMG:wl_20260909_130200_324_6ba52f_clipboard.png]]
+
+moxa iothinx 4510
+[[IMG:wl_20260909_130200_880_d0f429_clipboard.png]]
+
+[[IMG:wl_20260909_130200_409_8ed4c1_clipboard.png]]
+
+[[IMG:wl_20260909_130200_313_15c294_clipboard.png]]
+
+WAGO_IO SYS
+[[IMG:wl_20260909_130200_379_be58e7_clipboard.png]]
+
+[[IMG:wl_20260909_130200_859_c83766_clipboard.png]]
+
+[[IMG:wl_20260909_130200_325_c5a639_clipboard.png]]
+
+[[IMG:wl_20260909_130200_968_d896d0_clipboard.png]]
+
+实点科技
+[https://www.solidotech.com/cn/products/xb6s-pt04a|https://www.solidotech.com/cn/products/xb6s-pt04a]
+[[IMG:wl_20260909_130200_231_b0ab82_clipboard.png]]
+
+[[IMG:wl_20260909_130200_215_5adab6_clipboard.png]]
+
+ME/ME-MAX Electronic Housings - Phoenix Contact
+[https://www.youtube.com/watch?v=_NYeegIIa_8|https://www.youtube.com/watch?v=_NYeegIIa_8]
+
+[[IMG:wl_20260909_130200_816_f600a6_clipboard.png]]
+
+[https://www.triomotion.com/public/products/motionplc/motionPLCExpansion.php|https://www.triomotion.com/public/products/motionplc/motionPLCExpansion.php]
+
+[[IMG:wl_20260909_130200_036_8cece4_clipboard.png]]
+
+內部匯流排連接器 (側向滑入對接)
+
+型號狀態： 全新客製化專利零件，無法在市面上取得標準品型號。
+
+結構設計： 為了達成模組化的正面滑入擴充機制，設計團隊全新開發了一款專屬的 BUS 電氣連接器。
+
+客製化原因： 開發團隊特別指出，自行開模是為了避開極度擁擠的專利壁壘，沒有通用的標準連接器可以買。"""
+
+PBY11_MARKERS = [x.strip() for x in m.IMG_MARKER_RE.findall(PBY11_COMMENT)]
+check(len(PBY11_MARKERS) == 12, f"[案例4] 標記數應為 12，實得 {len(PBY11_MARKERS)}")
+
+# 同一天上傳、但備註沒有 [[IMG:]] 的附件（day-attachment 掃描補上，只能接在備註之後）
+PBY11_ORPHANS = [
+    "wl_20260909_130207_640_c03141_clipboard.png",
+    "wl_20260909_130209_351_e227fa_clipboard.png",
+]
+for fn in PBY11_MARKERS + PBY11_ORPHANS:
+    m._CONF_IMAGE_META[m.conf_unique_img_name("PBY-11", fn)] = {
+        "width": 1200, "height": 700, "version": 1, "alt": fn,
+    }
+
+soup4 = BeautifulSoup("", "html.parser")
+row4 = soup4.new_tag("div", style="margin-bottom: 12px;")
+soup4.append(row4)
+p4 = soup4.new_tag("p", style="margin-top: 0px; margin-bottom: 10px; color: #555555;")
+sp4 = soup4.new_tag("span", style="color: #ffffff; user-select: none;")
+sp4.string = "--------"
+p4.append(sp4)
+p4.append(soup4.new_string("└ 📝 (3h56m) "))
+m.append_wysiwyg_comment(
+    soup4, p4, PBY11_COMMENT,
+    color_style="color: #555555;", issue_key="PBY-11", bg_color="#ffffff",
+    hang_prefix="└ 📝 (3h56m) ", left_gutter="--------",
+)
+# 未標記當日附件確實會被 exclude_names 之外的部分掃進來並附加在最後
+excl = [x.strip() for x in m.IMG_MARKER_RE.findall(PBY11_COMMENT)]
+day_atts = [
+    {"filename": fn, "id": str(i), "created": "2026-09-09T16:34:08.000+0800"}
+    for i, fn in enumerate(PBY11_MARKERS + PBY11_ORPHANS, 1)
+]
+swept = m.list_day_image_filenames(day_atts, "2026-09-09", exclude_names=excl, issue_key="PBY-11")
+check(swept == PBY11_ORPHANS,
+      f"[案例4] day-attachment 掃描應只剩未標記的 {PBY11_ORPHANS}，實得 {swept}")
+m.append_day_attachment_images(
+    soup4, p4, "PBY-11", swept,
+    color_style="color: #555555;", bg_color="#ffffff",
+    hang_prefix="└ 📝 (3h56m) ", left_gutter="--------",
+)
+row4.append(p4)
+
+m.promote_images_to_block_media(soup4, "214925313")
+audit_images(soup4, "案例4")
+
+seq4 = block_summary(row4)
+print("\n  區塊順序：")
+for kind, val in seq4:
+    print(f"    {kind:5s} | {val[:95]}")
+
+imgs4 = [v for k, v in seq4 if k == "img"]
+expected4 = [m.conf_unique_img_name("PBY-11", fn) for fn in PBY11_MARKERS + PBY11_ORPHANS]
+check(imgs4 == expected4,
+      f"[案例4] 圖片順序不符\n     實得 {imgs4}\n     預期 {expected4}")
+check(len(imgs4) == len(set(imgs4)), f"[案例4] 有重複圖片：{imgs4}")
+
+# 中文段落是備註最後一段文字；其後只允許「未標記」的當日附件
+para_idx = max(i for i, (k, v) in enumerate(seq4)
+               if k == "text" and "沒有通用的標準連接器可以買" in v)
+after = [v for k, v in seq4[para_idx + 1:] if k == "img"]
+check(after == [m.conf_unique_img_name("PBY-11", fn) for fn in PBY11_ORPHANS],
+      f"[案例4] 中文段落之後應只有未標記附件，實得 {after}")
+marked_positions = [seq4.index(("img", m.conf_unique_img_name("PBY-11", fn)))
+                    for fn in PBY11_MARKERS]
+check(all(i < para_idx for i in marked_positions),
+      "[案例4] 有 [[IMG:]] 標記的圖片被排到中文段落之後")
+check(marked_positions == sorted(marked_positions),
+      "[案例4] 標記圖片的相對順序與原文不一致")
+# 使用者指認的那張（第 2 個標記）必須就在 'moxa iothinx 4510' 之後
+d0f429 = m.conf_unique_img_name("PBY-11", "wl_20260909_130200_880_d0f429_clipboard.png")
+moxa_idx = next(i for i, (k, v) in enumerate(seq4) if k == "text" and "moxa iothinx 4510" in v)
+check(seq4[moxa_idx + 1] == ("img", d0f429),
+      f"[案例4] 第 2 個標記未緊接 'moxa iothinx 4510'，實得 {seq4[moxa_idx + 1]}")
+
+
 hr("結果")
 if failures:
     print("❌ 驗證失敗：")
