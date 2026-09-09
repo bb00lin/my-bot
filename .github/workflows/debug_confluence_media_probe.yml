@@ -22,6 +22,14 @@ on:
         description: 'verify stage: ZZZ_IMGTEST page id to keep'
         required: false
         default: ''
+      page_ids:
+        description: 'migrate stage: comma-separated existing page ids to back-fill'
+        required: false
+        default: ''
+      migrate:
+        description: 'migrate stage: actually rewrite storage (true/false)'
+        required: false
+        default: 'false'
       make_test_page:
         description: 'Stage 2 only: create ZZZ_IMGTEST_lightbox_probe page'
         required: false
@@ -51,6 +59,8 @@ jobs:
           PROBE_SPACE_KEY: ${{ github.event.inputs.space_key }}
           PROBE_MAKE_TEST_PAGE: ${{ github.event.inputs.make_test_page }}
           PROBE_KEEP_PAGE_ID: ${{ github.event.inputs.keep_page_id }}
+          PROBE_PAGE_IDS: ${{ github.event.inputs.page_ids }}
+          PROBE_MIGRATE: ${{ github.event.inputs.migrate }}
           PYTHONIOENCODING: 'utf-8'
         run: |
           case "${{ github.event.inputs.stage }}" in
@@ -58,5 +68,6 @@ jobs:
             3) python scripts/probe_confluence_media3.py ;;
             4) python scripts/probe_confluence_media4.py ;;
             verify) python scripts/probe_confluence_verify.py ;;
+            migrate) python scripts/probe_confluence_migrate.py ;;
             *) python scripts/probe_confluence_media.py ;;
           esac
