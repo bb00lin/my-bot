@@ -471,8 +471,9 @@ def build_block_ac_image(soup, conf_filename, width=IMG_BLOCK_WIDTH):
     orig_w = int(meta.get("width") or 0)
     orig_h = int(meta.get("height") or 0)
     attrs = {
-        "ac:align": "center",
-        "ac:layout": "center",
+        # 靠左：Cloud 編輯器對左對齊圖片產生的 storage 組合是 align=left + layout=align-start
+        "ac:align": "left",
+        "ac:layout": "align-start",
         "ac:custom-width": "true",
         "ac:alt": meta.get("alt") or conf_filename,
         "ac:width": str(min(width, orig_w) if orig_w else width),
@@ -495,7 +496,7 @@ _INLINE_ANCESTORS = {
 
 
 def _block_anchor_for(node):
-    """往上爬出所有行內／段落祖先，回傳應該把圖片插在其後的節點。"""
+    """往上爬出所有行內／段落祖先，回傳包住圖片的那個 block 節點（通常是 <p>）。"""
     current = node
     while True:
         parent = current.parent
@@ -508,6 +509,96 @@ def _is_zoom_hint_anchor(a_tag):
     return (a_tag.get_text(strip=True) or "").startswith("🔍")
 
 
+# 隱形縮排 gutter 只由 '-' 與空白組成（append_wysiwyg_comment 產生），拆段時要保留在續行開頭
+_GUTTER_CHARS = set("- \u00a0\t\r\n")
+
+
+def _is_padding_leaf(node, *, keep_gutter):
+    """拆段後的多餘節點：<br>、空白字串、空標籤；keep_gutter=False 時連隱形 gutter 也算。"""
+    if isinstance(node, NavigableString):
+        text = str(node)
+        if not text.strip():
+            return True
+        if keep_gutter:
+            return False
+        parent = node.parent
+        in_gutter_span = getattr(parent, "name", "") == "span"
+        return in_gutter_span and set(text) <= _GUTTER_CHARS
+    if not isinstance(node, Tag):
+        return False
+    if node.name == "br":
+        return True
+    return not node.contents and node.name not in ("ac:image", "img", "hr", "ri:attachment")
+
+
+def _leaf_sequence(container):
+    """依文件順序列出容器內的葉節點（字串、<br>、圖片、空標籤）。"""
+    leaves = []
+    for node in container.descendants:
+        if isinstance(node, NavigableString):
+            leaves.append(node)
+        elif isinstance(node, Tag) and (node.name == "br" or not node.contents):
+            leaves.append(node)
+    return leaves
+
+
+def _prune_upwards(node, stop_at):
+    """移除節點，並把因此變空的行內祖先一併清掉（不越過 stop_at）。"""
+    parent = node.parent
+    node.extract()
+    while parent is not None and parent is not stop_at:
+        grand = parent.parent
+        if parent.contents or (getattr(parent, "name", "") or "") not in _INLINE_ANCESTORS:
+            break
+        parent.extract()
+        parent = grand
+
+
+def _trim_block_padding(block, *, leading, keep_gutter):
+    """清掉 block 開頭（leading=True）或結尾的殘留 <br>／空標籤／隱形 gutter。"""
+    while True:
+        leaves = _leaf_sequence(block)
+        if not leaves:
+            return
+        leaf = leaves[0] if leading else leaves[-1]
+        if not _is_padding_leaf(leaf, keep_gutter=keep_gutter):
+            return
+        _prune_upwards(leaf, block)
+
+
+def _block_is_blank(block):
+    """沒有圖片、且去掉隱形 gutter 後沒有可見文字 → 這個 block 可以整段丟掉。"""
+    if block.find(["ac:image", "img"]):
+        return False
+    text = block.get_text() or ""
+    return not (set(text) - _GUTTER_CHARS)
+
+
+def _split_block_at(soup, block, node):
+    """把 block 在 node 的位置剖成兩半：node 之後的內容複製成新的同層 block 並回傳。
+
+    node 會被取出（由呼叫端改放到獨立的圖片段落）。沿路的行內祖先（span/a/…）都會
+    複製一份到後半段，讓原本的字色、隱形縮排等視覺格式延續下去。
+    """
+    current = node
+    tail = None
+    while True:
+        parent = current.parent
+        clone = soup.new_tag(parent.name)
+        clone.attrs = dict(parent.attrs)
+        if tail is not None:
+            clone.append(tail)
+        for sibling in list(current.next_siblings):
+            clone.append(sibling.extract())
+        tail = clone
+        if parent is block:
+            break
+        current = parent
+
+    node.extract()
+    return tail
+
+
 def promote_images_to_block_media(soup, page_id):
     """把行內圖片改寫成 block 層 <ac:image>，讓 Confluence Cloud 產生可點擊放大的 media 節點。
 
@@ -515,6 +606,10 @@ def promote_images_to_block_media(soup, page_id):
     mediaSingle/media，點擊即開原生放大檢視器；若與文字同段落（行內），
     則被轉成 com.atlassian.confluence.migration/inline-media-image 擴充，點擊完全無反應。
     包住圖片的 <a> 也必須拆掉，否則 media 會帶 link mark，點擊變成跳轉而非放大。
+
+    圖片段落是就地「剖開」原本的 block 產生的（前文 <p> → 圖片 <p> → 後文 <p> → …），
+    所以備註裡文字與 [[IMG:]] 交錯的原始順序會完整保留；早期版本是把圖片一律插到整個
+    段落之後，才會出現「文字全部在上、圖片全部擠在下面」。
     """
     if not page_id:
         return
@@ -544,23 +639,33 @@ def promote_images_to_block_media(soup, page_id):
 
     refresh_conf_image_meta(page_id, [fn for _, fn in targets])
 
-    # 3. 逐一搬到 block 層；同一個 anchor 底下維持原本順序
-    last_inserted = {}
+    # 3. 依文件順序逐張剖開所在 block，讓「文字 → 圖片 → 文字 → 圖片」的順序原樣保留
     for node, conf_fn in targets:
-        anchor = _block_anchor_for(node)
-        wrapper_a = node.find_parent("a")
+        if node.parent is None:
+            continue
+
         block_p = soup.new_tag("p", style="margin: 6px 0;")
         block_p.append(build_block_ac_image(soup, conf_fn))
 
-        ref = last_inserted.get(id(anchor), anchor)
-        ref.insert_after(block_p)
-        last_inserted[id(anchor)] = block_p
+        block = _block_anchor_for(node)
+        if node is block:
+            # 圖片本來就直接掛在 td/div 等容器下，直接換成獨立段落即可
+            node.replace_with(block_p)
+            continue
 
-        node.extract()
-        if wrapper_a is not None and not wrapper_a.get_text(strip=True) and not wrapper_a.find(True):
-            wrapper_a.decompose()
+        tail_block = _split_block_at(soup, block, node)
+        block.insert_after(block_p)
+        block_p.insert_after(tail_block)
 
-    print(f"  🖼️ 已將 {len(targets)} 張圖片改為 block 層 ac:image（可點擊放大）")
+        # 前半段結尾的換行、後半段開頭的換行都是拆點留下的殘渣；後半段要留 gutter 維持縮排
+        _trim_block_padding(block, leading=False, keep_gutter=False)
+        _trim_block_padding(tail_block, leading=True, keep_gutter=True)
+        if _block_is_blank(block):
+            block.decompose()
+        if _block_is_blank(tail_block):
+            tail_block.decompose()
+
+    print(f"  🖼️ 已將 {len(targets)} 張圖片改為 block 層 ac:image（靠左、可點擊放大）")
 
 
 def ensure_page_editor_v2(page_id):
@@ -667,6 +772,75 @@ def append_day_attachment_images(
             span = soup.new_tag("span", style=color_style or "color: #555555;")
             span.string = f"[[IMG:{fn}]]"
             parent_tag.append(span)
+
+def list_day_issue_comments(issue_obj, day_str):
+    """列出某任務在指定日期（以 created 換算台北時間）的 issue 留言（活動 → 留言）。
+
+    僅供「範圍 A」使用：在週報「原本就會出現」的任務／日期列上補一個連結，
+    不參與任何篩選（has_log／hide_status_only／待辦去重／工時統計都不受影響）。
+    - 用 created 而非 updated，避免舊留言被編輯後被搬到今天
+    - 帶 visibility（限角色／群組）的留言直接略過：腳本以管理者身分執行，不可洩漏受限內容
+    - 不過濾作者：同事在你的任務上留言也一併列出（使用者要求放寬）
+    """
+    if not issue_obj or not day_str:
+        return []
+    comments = ((issue_obj.get("fields") or {}).get("comment") or {}).get("comments") or []
+    picked = []
+    for cmt in comments:
+        if cmt.get("visibility"):
+            continue
+        cid = cmt.get("id")
+        if not cid:
+            continue
+        created_dt = parse_jira_date_to_dt(cmt.get("created"))
+        if not created_dt or created_dt.strftime("%Y-%m-%d") != day_str:
+            continue
+        picked.append({
+            "id": str(cid),
+            "author": (cmt.get("author") or {}).get("displayName") or "",
+            "created_dt": created_dt,
+        })
+    picked.sort(key=lambda c: (c["created_dt"], c["id"]))
+    return picked
+
+
+def jira_comment_deeplink(issue_key, comment_id):
+    """Jira Cloud 會捲動並高亮該留言；不加 &page=... 舊參數（同分頁會失效）。"""
+    return f"{JIRA_URL}/browse/{issue_key}?focusedCommentId={comment_id}"
+
+
+def append_day_comment_link(
+    soup, parent_tag, issue_key, comments, color_style="", bg_color="#ffffff",
+    hang_prefix="└ 📝 ", left_gutter="--------",
+):
+    """該日任務有留言時補一行連結，點了直接跳到 Jira 該留言（只放連結，不帶內文／圖片）。"""
+    if not issue_key or not comments:
+        return
+    newest = comments[-1]
+    author = newest.get("author") or ""
+
+    if len(comments) > 1:
+        label = f"💬 留言 ({len(comments)})"
+        if author:
+            label += f" · 最新 {author}"
+    else:
+        label = f"💬 留言 · {author}" if author else "💬 留言"
+
+    parent_tag.append(soup.new_tag("br"))
+    spacer = soup.new_tag("span", style=f"color: {bg_color}; user-select: none;")
+    spacer.string = _invisible_hang_indent(left_gutter, hang_prefix)
+    parent_tag.append(spacer)
+
+    a_tag = soup.new_tag(
+        "a",
+        href=jira_comment_deeplink(issue_key, newest["id"]),
+        target="_blank",
+        rel="noopener noreferrer",
+        style="color: #8e44ad; text-decoration: underline;",
+    )
+    a_tag.string = label
+    parent_tag.append(a_tag)
+
 
 def upload_pending_images_to_confluence(page_id):
     """從 Jira Issue 附件下載並上傳到 Confluence 頁面。"""
@@ -913,7 +1087,7 @@ def fetch_all_recent_issues(min_date):
         payload = {
             "jql": jql, 
             "maxResults": 100, 
-            "fields": ["summary", "status", "project", "parent", "labels", "worklog", "assignee", "duedate", "timetracking", "updated", "attachment"],
+            "fields": ["summary", "status", "project", "parent", "labels", "worklog", "assignee", "duedate", "timetracking", "updated", "attachment", "comment"],
             "expand": "changelog" 
         }
         
@@ -949,6 +1123,19 @@ def fetch_all_recent_issues(min_date):
                     issue['fields']['worklog']['worklogs'] = res.json().get('worklogs', [])
             except: pass
             
+        # search/jql 每筆 issue 最多只回約 20 則留言；留言多的任務要補抓最新幾則，
+        # 否則當日留言可能不在回傳範圍內（僅供「有沒有留言 + 最新留言 id」判斷用）
+        c_data = issue['fields'].get('comment') or {}
+        if c_data.get('total', 0) > len(c_data.get('comments', [])):
+            try:
+                res = requests.get(
+                    f"{JIRA_URL}/rest/api/2/issue/{key}/comment?orderBy=-created&maxResults=100",
+                    auth=ADMIN_AUTH, timeout=10,
+                )
+                if res.status_code == 200:
+                    issue['fields']['comment']['comments'] = res.json().get('comments', [])
+            except: pass
+
         cl_data = issue.get('changelog', {})
         histories = cl_data.get('histories', [])
         total_cl = cl_data.get('total', len(histories))
@@ -1277,7 +1464,11 @@ def enrich_with_weekly_data(base_logs, name, email, account_id, days_to_process,
                 issue_key=issue_obj.get("key"),
             )
             day_attachments = day_images + day_files
-            
+
+            # 範圍 A：只在原本就會顯示的列上補留言連結，刻意不納入 has_log 判斷，
+            # 免得「只有留言」的任務／日期被新拉進週報。
+            day_comments = list_day_issue_comments(issue_obj, day_str)
+
             has_log = bool(wls or trans or day_attachments)
             if SETTINGS.get("hide_status_only"):
                 if total_mins_day == 0 and not joined_comment.strip() and not day_attachments:
@@ -1288,7 +1479,7 @@ def enrich_with_weekly_data(base_logs, name, email, account_id, days_to_process,
             daily_days.append({
                 "date": target_date, "day_name": day_name, "day_short": day_short, "dur_str": dur_str,
                 "total_mins_day": total_mins_day, "comment": joined_comment, "transition": trans, "has_log": has_log,
-                "day_images": day_attachments,
+                "day_images": day_attachments, "day_comments": day_comments,
             })
         
         if not has_week_log: continue
@@ -1799,6 +1990,12 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                         hang_prefix=comment_prefix,
                         left_gutter="--------",
                     )
+                # 留言連結放在備註文字之後、當日附件圖片之前（只有週報風格 3 會顯示）
+                append_day_comment_link(
+                    soup, p_comment, log.get("key"), d_info.get("day_comments") or [],
+                    color_style=color_style, bg_color=bg_color,
+                    hang_prefix=comment_prefix, left_gutter="--------",
+                )
                 append_day_attachment_images(
                     soup, p_comment, log.get("key"), day_imgs,
                     color_style=color_style, bg_color=bg_color,
