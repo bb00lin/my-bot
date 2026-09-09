@@ -15,9 +15,13 @@ on:
         required: false
         default: 'teamAIoTHW'
       stage:
-        description: 'Probe stage: 1 (read-only) or 2 (ADF + test page)'
+        description: 'Probe stage: 1..4 or "verify" (verify live page + cleanup)'
         required: false
         default: '1'
+      keep_page_id:
+        description: 'verify stage: ZZZ_IMGTEST page id to keep'
+        required: false
+        default: ''
       make_test_page:
         description: 'Stage 2 only: create ZZZ_IMGTEST_lightbox_probe page'
         required: false
@@ -46,11 +50,13 @@ jobs:
           PROBE_PAGE_ID: ${{ github.event.inputs.page_id }}
           PROBE_SPACE_KEY: ${{ github.event.inputs.space_key }}
           PROBE_MAKE_TEST_PAGE: ${{ github.event.inputs.make_test_page }}
+          PROBE_KEEP_PAGE_ID: ${{ github.event.inputs.keep_page_id }}
           PYTHONIOENCODING: 'utf-8'
         run: |
           case "${{ github.event.inputs.stage }}" in
             2) python scripts/probe_confluence_media2.py ;;
             3) python scripts/probe_confluence_media3.py ;;
             4) python scripts/probe_confluence_media4.py ;;
+            verify) python scripts/probe_confluence_verify.py ;;
             *) python scripts/probe_confluence_media.py ;;
           esac

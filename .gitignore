@@ -4,3 +4,4 @@ config.yaml
 .register_cache/
 logs/
 *.xlsx
+__pycache__/
