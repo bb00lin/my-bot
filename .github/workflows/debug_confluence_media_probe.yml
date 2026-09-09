@@ -1,0 +1,40 @@
+name: DEBUG Confluence media probe (temporary)
+
+# 一次性診斷用（手動觸發），唯讀、不修改任何 Confluence 內容、不輸出任何金鑰。
+# 診斷完成後可刪除此 workflow 與 scripts/probe_confluence_media.py。
+
+on:
+  workflow_dispatch:
+    inputs:
+      page_id:
+        description: 'Confluence page id to inspect'
+        required: false
+        default: '208109570'
+      space_key:
+        description: 'Space key to scan for editor-inserted images'
+        required: false
+        default: 'teamAIoTHW'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run probe (read-only)
+        env:
+          CONF_URL: ${{ secrets.CONF_URL }}
+          CONF_USER: ${{ secrets.CONF_USER }}
+          CONF_PASS: ${{ secrets.CONF_PASS }}
+          PROBE_PAGE_ID: ${{ github.event.inputs.page_id }}
+          PROBE_SPACE_KEY: ${{ github.event.inputs.space_key }}
+        run: python scripts/probe_confluence_media.py
