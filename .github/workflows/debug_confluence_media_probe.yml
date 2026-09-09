@@ -14,6 +14,14 @@ on:
         description: 'Space key to scan for editor-inserted images'
         required: false
         default: 'teamAIoTHW'
+      stage:
+        description: 'Probe stage: 1 (read-only) or 2 (ADF + test page)'
+        required: false
+        default: '1'
+      make_test_page:
+        description: 'Stage 2 only: create ZZZ_IMGTEST_lightbox_probe page'
+        required: false
+        default: 'true'
 
 jobs:
   probe:
@@ -30,11 +38,18 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Run probe (read-only)
+      - name: Run probe
         env:
           CONF_URL: ${{ secrets.CONF_URL }}
           CONF_USER: ${{ secrets.CONF_USER }}
           CONF_PASS: ${{ secrets.CONF_PASS }}
           PROBE_PAGE_ID: ${{ github.event.inputs.page_id }}
           PROBE_SPACE_KEY: ${{ github.event.inputs.space_key }}
-        run: python scripts/probe_confluence_media.py
+          PROBE_MAKE_TEST_PAGE: ${{ github.event.inputs.make_test_page }}
+          PYTHONIOENCODING: 'utf-8'
+        run: |
+          if [ "${{ github.event.inputs.stage }}" = "2" ]; then
+            python scripts/probe_confluence_media2.py
+          else
+            python scripts/probe_confluence_media.py
+          fi
