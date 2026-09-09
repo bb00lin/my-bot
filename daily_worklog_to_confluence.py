@@ -2,11 +2,12 @@ import os
 import requests
 import json
 import re
+import struct
 import sys
 import time
 from datetime import datetime, timezone, timedelta
 from requests.auth import HTTPBasicAuth
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse, quote, unquote
 from bs4 import BeautifulSoup, Tag, NavigableString
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
@@ -371,105 +372,225 @@ def make_attachment_link_tag(soup, filename, meta=None, color_style="", issue_ke
     span.string = display
     return span
 
-def confluence_attachment_full_url(page_id, filename):
-    """僅供 <img src> 內嵌縮圖；勿當放大 href（download 路徑常觸發另存新檔）。"""
-    if not page_id or not filename:
-        return None
-    return f"{JIRA_URL}/wiki/download/attachments/{page_id}/{quote(filename, safe='')}"
+IMG_BLOCK_WIDTH = 640
 
-def image_full_view_url(conf_filename, issue_key=None, jira_filename=None, page_id=None):
-    """放大／點圖：只開 Jira browse（帶 attachmentId）。禁止 /secure/attachment。"""
-    if issue_key:
-        meta = get_cached_attachment_meta(issue_key, jira_filename) if jira_filename else None
-        url = jira_attachment_browser_url(meta, issue_key=issue_key)
-        if url:
-            return url
+# conf 附件檔名 -> {"width", "height", "version", "alt"}；block <ac:image> 需要原始尺寸
+_CONF_IMAGE_META = {}
+
+# 爬出 <img src> 內嵌的 conf 附件檔名（前次執行留下的舊格式）
+_CONF_IMG_SRC_RE = re.compile(r"/wiki/download/attachments/\d+/([^/?\"']+)")
+
+
+def read_image_size(data):
+    """不依賴 PIL，直接由檔頭解析 PNG / GIF / JPEG / BMP 的原始尺寸。"""
+    if not data or len(data) < 24:
+        return None
+    try:
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            w, h = struct.unpack(">II", data[16:24])
+            return int(w), int(h)
+        if data[:6] in (b"GIF87a", b"GIF89a"):
+            w, h = struct.unpack("<HH", data[6:10])
+            return int(w), int(h)
+        if data[:2] == b"BM":
+            w, h = struct.unpack("<ii", data[18:26])
+            return abs(int(w)), abs(int(h))
+        if data[:2] == b"\xff\xd8":
+            i = 2
+            while i < len(data) - 9:
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7 or marker == 0x01:
+                    i += 2
+                    continue
+                seg_len = struct.unpack(">H", data[i + 2:i + 4])[0]
+                if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                              0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                    h, w = struct.unpack(">HH", data[i + 5:i + 9])
+                    return int(w), int(h)
+                i += 2 + seg_len
+    except Exception:
+        return None
     return None
 
-def _new_jira_issue_anchor(soup, href, *, wrap_image=False):
-    """一律開 Jira browse（新分頁）。成功條件是打開單據，不是 lightbox。"""
-    attrs = {
-        "href": href,
-        "target": "_blank",
-        "rel": "noopener noreferrer",
-        "title": "開啟 Jira 單據（可再點附件看原圖）",
-    }
-    if wrap_image:
-        attrs["style"] = "text-decoration: none;"
-    else:
-        attrs["style"] = "color: #2980b9; text-decoration: underline;"
-    return soup.new_tag("a", **attrs)
+
+def refresh_conf_image_meta(page_id, filenames):
+    """補齊 Confluence 附件的版本號與原始尺寸，供 block <ac:image> 使用。"""
+    wanted = {fn for fn in filenames if fn}
+    if not page_id or not wanted:
+        return
+    try:
+        res = requests.get(
+            f"{JIRA_URL}/wiki/rest/api/content/{page_id}/child/attachment?limit=200&expand=version",
+            auth=ADMIN_AUTH, timeout=30,
+        )
+        results = res.json().get("results", []) if res.status_code == 200 else []
+    except Exception as e:
+        print(f"  ⚠️ 讀取附件版本失敗: {e}")
+        return
+
+    by_name = {a.get("title"): a for a in results}
+    for fn in wanted:
+        att = by_name.get(fn)
+        if not att:
+            continue
+        meta = _CONF_IMAGE_META.setdefault(fn, {})
+        meta["version"] = ((att.get("version") or {}).get("number")) or 1
+        if meta.get("width") and meta.get("height"):
+            continue
+        download = (att.get("_links") or {}).get("download") or ""
+        if not download:
+            continue
+        try:
+            blob = requests.get(f"{JIRA_URL}/wiki{download}", auth=ADMIN_AUTH, timeout=45).content
+            dims = read_image_size(blob)
+            if dims:
+                meta["width"], meta["height"] = dims
+        except Exception:
+            continue
+
 
 def make_confluence_image_tag(
-    soup, conf_filename, *, issue_key=None, jira_filename=None, width=640, page_id=None,
+    soup, conf_filename, *, issue_key=None, jira_filename=None, width=IMG_BLOCK_WIDTH, page_id=None,
 ):
-    """縮圖下方必有可見文字連結，開 Jira issue 頁（非下載、非 lightbox）。"""
-    page_id = page_id or _CURRENT_CONF_PAGE_ID
-    href = image_full_view_url(
-        conf_filename, issue_key=issue_key, jira_filename=jira_filename, page_id=page_id,
-    )
-    inline_src = confluence_attachment_full_url(page_id, conf_filename) if page_id else None
-
-    wrapper = soup.new_tag("span")
-
-    def _append_visible_jira_link():
-        if not href:
-            return
-        wrapper.append(soup.new_tag("br"))
-        a_open = _new_jira_issue_anchor(soup, href, wrap_image=False)
-        a_open.string = "🔍 在 Jira 開啟原圖"
-        wrapper.append(a_open)
-
-    if inline_src:
-        img_tag = soup.new_tag(
-            "img",
-            src=inline_src,
-            width=str(width),
-            style=f"max-width:{width}px; height:auto; border:1px solid #bdc3c7;",
-            alt=(jira_filename or conf_filename),
-        )
-        if href:
-            a_img = _new_jira_issue_anchor(soup, href, wrap_image=True)
-            a_img.append(img_tag)
-            wrapper.append(a_img)
-        else:
-            wrapper.append(img_tag)
-        _append_visible_jira_link()
-        return wrapper
-
+    """先放一個 <ac:image> 佔位；儲存前由 promote_images_to_block_media 補屬性並移到 block 位置。"""
+    meta = _CONF_IMAGE_META.setdefault(conf_filename, {})
+    if jira_filename:
+        meta.setdefault("alt", jira_filename)
     img = soup.new_tag("ac:image", **{"ac:width": str(width)})
     ri = soup.new_tag("ri:attachment", **{"ri:filename": conf_filename})
     img.append(ri)
-    if href:
-        a_img = _new_jira_issue_anchor(soup, href, wrap_image=True)
-        a_img.append(img)
-        wrapper.append(a_img)
-    else:
-        wrapper.append(img)
-    _append_visible_jira_link()
-    return wrapper
+    return img
 
-def upgrade_ac_images_to_clickable(soup, page_id):
-    """將舊版 ac:image 轉成可點擊的 HTML img（儲存前保險掃描）。"""
+
+def build_block_ac_image(soup, conf_filename, width=IMG_BLOCK_WIDTH):
+    """產生與 Confluence Cloud 編輯器等價的 <ac:image>（block 層才會轉成 mediaSingle）。"""
+    meta = _CONF_IMAGE_META.get(conf_filename) or {}
+    orig_w = int(meta.get("width") or 0)
+    orig_h = int(meta.get("height") or 0)
+    attrs = {
+        "ac:align": "center",
+        "ac:layout": "center",
+        "ac:custom-width": "true",
+        "ac:alt": meta.get("alt") or conf_filename,
+        "ac:width": str(min(width, orig_w) if orig_w else width),
+    }
+    if orig_w and orig_h:
+        attrs["ac:original-width"] = str(orig_w)
+        attrs["ac:original-height"] = str(orig_h)
+    img = soup.new_tag("ac:image", **attrs)
+    ri_attrs = {"ri:filename": conf_filename,
+                "ri:version-at-save": str(int(meta.get("version") or 1))}
+    img.append(soup.new_tag("ri:attachment", **ri_attrs))
+    return img
+
+
+# <ac:image> 必須跳出這些行內／段落標籤才算 block 層
+_INLINE_ANCESTORS = {
+    "p", "span", "a", "em", "strong", "b", "i", "u", "s", "strike",
+    "sub", "sup", "small", "big", "font", "code", "time",
+}
+
+
+def _block_anchor_for(node):
+    """往上爬出所有行內／段落祖先，回傳應該把圖片插在其後的節點。"""
+    current = node
+    while True:
+        parent = current.parent
+        if parent is None or (getattr(parent, "name", "") or "") not in _INLINE_ANCESTORS:
+            return current
+        current = parent
+
+
+def _is_zoom_hint_anchor(a_tag):
+    return (a_tag.get_text(strip=True) or "").startswith("🔍")
+
+
+def promote_images_to_block_media(soup, page_id):
+    """把行內圖片改寫成 block 層 <ac:image>，讓 Confluence Cloud 產生可點擊放大的 media 節點。
+
+    實測（同站台測試頁）：<ac:image> 位於 block 層時，storage→ADF 會轉成
+    mediaSingle/media，點擊即開原生放大檢視器；若與文字同段落（行內），
+    則被轉成 com.atlassian.confluence.migration/inline-media-image 擴充，點擊完全無反應。
+    包住圖片的 <a> 也必須拆掉，否則 media 會帶 link mark，點擊變成跳轉而非放大。
+    """
     if not page_id:
         return
-    for ac_img in list(soup.find_all("ac:image")):
-        ri = ac_img.find("ri:attachment")
-        if not ri:
-            continue
-        conf_fn = ri.get("ri:filename") or ""
-        if not conf_fn or ac_img.find_parent("a"):
-            continue
-        # 從 wl_{KEY}_{name} 反推 issue_key
-        issue_key = None
-        m = re.match(r"^wl_([A-Z][A-Z0-9]+-\d+)_(.+)$", conf_fn, re.I)
-        jira_fn = m.group(2) if m else conf_fn
+
+    # 1. 清掉舊版「🔍 …」可見連結與其前置 <br>
+    for a_tag in list(soup.find_all("a")):
+        if _is_zoom_hint_anchor(a_tag):
+            prev = a_tag.previous_sibling
+            a_tag.decompose()
+            if getattr(prev, "name", "") == "br":
+                prev.decompose()
+
+    # 2. 收集圖片節點（含前次執行殘留的 HTML <img>）
+    targets = []
+    for img in soup.find_all("img"):
+        m = _CONF_IMG_SRC_RE.search(img.get("src") or "")
         if m:
-            issue_key = m.group(1).upper()
-        new_block = make_confluence_image_tag(
-            soup, conf_fn, issue_key=issue_key, jira_filename=jira_fn, page_id=page_id,
-        )
-        ac_img.replace_with(new_block)
+            targets.append((img, unquote(m.group(1))))
+    for ac_img in soup.find_all("ac:image"):
+        ri = ac_img.find("ri:attachment")
+        conf_fn = (ri.get("ri:filename") if ri else "") or ""
+        if conf_fn:
+            targets.append((ac_img, conf_fn))
+
+    if not targets:
+        return
+
+    refresh_conf_image_meta(page_id, [fn for _, fn in targets])
+
+    # 3. 逐一搬到 block 層；同一個 anchor 底下維持原本順序
+    last_inserted = {}
+    for node, conf_fn in targets:
+        anchor = _block_anchor_for(node)
+        wrapper_a = node.find_parent("a")
+        block_p = soup.new_tag("p", style="margin: 6px 0;")
+        block_p.append(build_block_ac_image(soup, conf_fn))
+
+        ref = last_inserted.get(id(anchor), anchor)
+        ref.insert_after(block_p)
+        last_inserted[id(anchor)] = block_p
+
+        node.extract()
+        if wrapper_a is not None and not wrapper_a.get_text(strip=True) and not wrapper_a.find(True):
+            wrapper_a.decompose()
+
+    print(f"  🖼️ 已將 {len(targets)} 張圖片改為 block 層 ac:image（可點擊放大）")
+
+
+def ensure_page_editor_v2(page_id):
+    """把頁面標記為 Cloud 編輯器；Fabric renderer 才會用 media 節點的原生放大檢視器。"""
+    if not page_id:
+        return
+    base = f"{JIRA_URL}/wiki/rest/api/content/{page_id}"
+    try:
+        cur = requests.get(f"{base}/property/editor", auth=ADMIN_AUTH, timeout=20)
+        if cur.status_code == 200:
+            data = cur.json()
+            if (data.get("value") or "") == "v2":
+                print("  ℹ️ 頁面已是 Cloud 編輯器 (editor=v2)")
+                return
+            next_ver = ((data.get("version") or {}).get("number") or 1) + 1
+            res = requests.put(
+                f"{base}/property/editor", auth=ADMIN_AUTH, timeout=20,
+                json={"key": "editor", "value": "v2", "version": {"number": next_ver}},
+            )
+        else:
+            res = requests.post(
+                f"{base}/property", auth=ADMIN_AUTH, timeout=20,
+                json={"key": "editor", "value": "v2"},
+            )
+        if res.status_code in (200, 201):
+            print("  ✅ 已將頁面切為 Cloud 編輯器 (editor=v2)")
+        else:
+            print(f"  ⚠️ 設定 editor=v2 失敗: {res.status_code} {res.text[:150]}")
+    except Exception as e:
+        print(f"  ⚠️ 設定 editor=v2 例外: {e}")
 
 def _iter_day_attachments(issue_obj_or_atts, day_str, exclude_names=None, issue_key=None):
     """依附件建立日期（台北）列出當日附件；exclude 避免與 [[IMG:]] 重複。"""
@@ -583,6 +704,12 @@ def upload_pending_images_to_confluence(page_id):
             if not is_image_filename(jira_fn):
                 print(f"  ⏭️ 略過非圖片附件 {jira_fn}")
                 continue
+            # 記下原始尺寸，block <ac:image> 需要 ac:original-width/height
+            dims = read_image_size(bin_res.content)
+            meta_entry = _CONF_IMAGE_META.setdefault(conf_fn, {})
+            meta_entry.setdefault("alt", jira_fn)
+            if dims:
+                meta_entry["width"], meta_entry["height"] = dims
             files = {"file": (conf_fn, bin_res.content, mime)}
             up = requests.post(attach_url, auth=ADMIN_AUTH, headers=headers, files=files, timeout=60)
             if up.status_code in (200, 201):
@@ -2206,8 +2333,8 @@ def run_sync_logic():
 
         if page_needs_update:
             print(f"\n💾 發現頁面有變動，正在將最終結果儲存至 Confluence...")
-            upgrade_ac_images_to_clickable(soup, page_id)
             upload_pending_images_to_confluence(page_id)
+            promote_images_to_block_media(soup, page_id)
             url = f"{api_endpoint}/{page_id}"
             payload = {
                 "version": {"number": page_data['version']['number'] + 1, "minorEdit": SETTINGS.get("minor_edit")},
@@ -2217,6 +2344,7 @@ def run_sync_logic():
             }
             update_res = requests.put(url, json=payload, auth=ADMIN_AUTH, headers={"Content-Type": "application/json"})
             if update_res.status_code == 200:
+                ensure_page_editor_v2(page_id)
                 sync_message = (
                     f"🎉 同步完成！\n"
                     f"本次共更新了 {total_logs_written} 筆任務紀錄至 Confluence。\n"

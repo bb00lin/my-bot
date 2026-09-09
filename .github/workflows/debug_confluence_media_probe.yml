@@ -36,7 +36,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests beautifulsoup4 python-dotenv lxml line-bot-sdk
 
       - name: Run probe
         env:
@@ -51,5 +51,6 @@ jobs:
           case "${{ github.event.inputs.stage }}" in
             2) python scripts/probe_confluence_media2.py ;;
             3) python scripts/probe_confluence_media3.py ;;
+            4) python scripts/probe_confluence_media4.py ;;
             *) python scripts/probe_confluence_media.py ;;
           esac
