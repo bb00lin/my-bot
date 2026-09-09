@@ -48,8 +48,8 @@ jobs:
           PROBE_MAKE_TEST_PAGE: ${{ github.event.inputs.make_test_page }}
           PYTHONIOENCODING: 'utf-8'
         run: |
-          if [ "${{ github.event.inputs.stage }}" = "2" ]; then
-            python scripts/probe_confluence_media2.py
-          else
-            python scripts/probe_confluence_media.py
-          fi
+          case "${{ github.event.inputs.stage }}" in
+            2) python scripts/probe_confluence_media2.py ;;
+            3) python scripts/probe_confluence_media3.py ;;
+            *) python scripts/probe_confluence_media.py ;;
+          esac
