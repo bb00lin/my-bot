@@ -540,6 +540,28 @@ def test_switches():
     finally:
         api.ORGANIZE_ONLY = False
 
+    # 首次上線會用的組合：dry_run + organize_only 必須完全不寫入任何東西。
+    # 這裡重現目前的實際狀態：舊版已先把 20260925 建在總目錄下（未分類）。
+    root, titles = build_tree()
+    FAKE.add_page("WeeklyReport_20260925", root, body=weekly_body(date(2026, 9, 25)))
+    titles.append("WeeklyReport_20260925")
+    api.ORGANIZE_ONLY = True
+    api.ORGANIZE_DRY_RUN = True
+    try:
+        mark = len(FAKE.requests)
+        api.main()
+        writes = [r for r in FAKE.requests[mark:] if r[0] in ("POST", "PUT", "DELETE")]
+        check("dry_run + organize_only 完全沒有任何寫入請求", not writes,
+              f"意外的寫入: {[(m, p) for m, p, *_ in writes][:5]}")
+        check("dry_run + organize_only 不會建立新週報",
+              FAKE.by_title("WeeklyReport_20261002") is None
+              and FAKE.by_title("WeeklyReport_20260925") is not None)
+        check("dry_run + organize_only 不會搬移任何頁面",
+              all(FAKE.parent_title_of(t) == "WeeklyReport" for t in titles))
+    finally:
+        api.ORGANIZE_ONLY = False
+        api.ORGANIZE_DRY_RUN = False
+
     root, titles = build_tree()
     api.ORGANIZE_ONLY = True
     api.GROUP_BY_HALF = False
