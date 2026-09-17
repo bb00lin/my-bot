@@ -2,6 +2,15 @@ name: Confluence Weekly2 Report
 
 on:
   workflow_dispatch: # 允許手動按鈕觸發
+    inputs:
+      group_by_half:
+        description: '依半年 (H1/H2) 分類週報頁面'
+        type: boolean
+        default: true
+      dry_run:
+        description: '只列出分類計畫，不實際建立分類頁或搬移頁面'
+        type: boolean
+        default: false
   schedule:
     # 台灣時間週日 16:00 = UTC 時間週日 08:00
     - cron: '0 8 * * 0'
@@ -34,6 +43,9 @@ jobs:
         CONF_URL: ${{ secrets.CONF_URL }}
         CONF_USER: ${{ secrets.CONF_USER }}
         CONF_PASS: ${{ secrets.CONF_PASS }}
+        # 排程觸發時這兩個值為空字串，腳本會套用預設值（分類開啟、非試跑）
+        WEEKLY_GROUP_BY_HALF: ${{ github.event.inputs.group_by_half }}
+        WEEKLY_ORGANIZE_DRY_RUN: ${{ github.event.inputs.dry_run }}
       run: |
         set -o pipefail
         python confluence_api2.py 2>&1 | tee output.txt
