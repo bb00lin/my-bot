@@ -11,6 +11,10 @@ on:
         description: '只列出分類計畫，不實際建立分類頁或搬移頁面'
         type: boolean
         default: false
+      organize_only:
+        description: '只整理既有頁面，不建立新週報'
+        type: boolean
+        default: false
   schedule:
     # 台灣時間週日 16:00 = UTC 時間週日 08:00
     - cron: '0 8 * * 0'
@@ -43,9 +47,10 @@ jobs:
         CONF_URL: ${{ secrets.CONF_URL }}
         CONF_USER: ${{ secrets.CONF_USER }}
         CONF_PASS: ${{ secrets.CONF_PASS }}
-        # 排程觸發時這兩個值為空字串，腳本會套用預設值（分類開啟、非試跑）
+        # 排程觸發時這些值為空字串，腳本會套用預設值（分類開啟、非試跑、照常建立新週報）
         WEEKLY_GROUP_BY_HALF: ${{ github.event.inputs.group_by_half }}
         WEEKLY_ORGANIZE_DRY_RUN: ${{ github.event.inputs.dry_run }}
+        WEEKLY_ORGANIZE_ONLY: ${{ github.event.inputs.organize_only }}
       run: |
         set -o pipefail
         python confluence_api2.py 2>&1 | tee output.txt

@@ -524,6 +524,35 @@ def test_switches():
         api.ORGANIZE_DRY_RUN = False
 
     root, titles = build_tree()
+    api.ORGANIZE_ONLY = True
+    try:
+        api.main()
+        check("只分類模式不會建立新週報",
+              FAKE.by_title("WeeklyReport_20260925") is None)
+        misplaced = [
+            t for t in titles
+            if FAKE.parent_title_of(t) != api.half_year_group_title(api.parse_report_date(t))
+        ]
+        check("只分類模式仍會把既有週報全部歸位", not misplaced, f"未歸位: {misplaced[:5]}")
+        check("只分類模式會建立需要的分類頁",
+              sorted(p["title"] for p in FAKE.children_of(root))
+              == ["2025H1", "2025H2", "2026H1", "2026H2"])
+    finally:
+        api.ORGANIZE_ONLY = False
+
+    root, titles = build_tree()
+    api.ORGANIZE_ONLY = True
+    api.GROUP_BY_HALF = False
+    try:
+        api.main()
+        check("只分類模式搭配總開關關閉時完全不動作",
+              FAKE.by_title("WeeklyReport_20260925") is None
+              and all(FAKE.parent_title_of(t) == "WeeklyReport" for t in titles))
+    finally:
+        api.ORGANIZE_ONLY = False
+        api.GROUP_BY_HALF = True
+
+    root, titles = build_tree()
     api.GROUP_BY_HALF = False
     try:
         api.main()

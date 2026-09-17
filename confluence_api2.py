@@ -40,6 +40,8 @@ GROUP_TITLE_PATTERN = re.compile(r'^\d{4}H[12]$')
 GROUP_BY_HALF = _env_flag("WEEKLY_GROUP_BY_HALF", True)
 # DRY RUN 只影響分類：新週報照常建立（暫掛舊位置），但不建立分類頁也不搬移任何頁面。
 ORGANIZE_DRY_RUN = _env_flag("WEEKLY_ORGANIZE_DRY_RUN", False)
+# 只分類模式：跳過建立新週報，用於一次性把既有頁面歸位而不多生一週的頁面。
+ORGANIZE_ONLY = _env_flag("WEEKLY_ORGANIZE_ONLY", False)
 MAX_PAGINATION_REQUESTS = 50
 GROUP_PAGE_BODY = (
     '<p>此頁由 confluence_api2.py 自動建立，用於收納該半年度的週報。</p>'
@@ -447,6 +449,11 @@ def main():
     print(f"=== Confluence API 自動週報 (完美排版 + 歷史大清洗 + 半年分類) ===")
     if ORGANIZE_DRY_RUN:
         print("🧪 DRY RUN 模式：只列出分類計畫，不會建立分類頁也不會搬移既有頁面。")
+    if ORGANIZE_ONLY:
+        print("📌 只分類模式：本次不建立新週報，僅整理既有頁面。")
+        if not GROUP_BY_HALF:
+            print("⚠️ 只分類模式搭配分類總開關關閉，本次沒有任何事情可做。")
+            return
     try:
         latest_page = find_latest_report()
         space_key = latest_page['space']['key']
@@ -460,7 +467,8 @@ def main():
             else:
                 print("⚠️ 基準週報沒有可用的父頁面，本次略過半年分類。")
 
-        create_new_report(latest_page, root_page, space_key, groups)
+        if not ORGANIZE_ONLY:
+            create_new_report(latest_page, root_page, space_key, groups)
 
         if GROUP_BY_HALF and root_page:
             organize_reports_by_half_year(root_page['id'], space_key, groups)
