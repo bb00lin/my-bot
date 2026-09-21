@@ -5,3 +5,23 @@ config.yaml
 logs/
 *.xlsx
 __pycache__/
+
+# 本機虛擬環境
+.venv/
+venv/
+
+# 憑證：與上面的 .env 同性質。這個 repo 是 public，絕對不要提交
+# jira_config.txt  -> github_gantt_sync.py / daily_worklog_to_confluence.py 以 load_dotenv 讀取
+# credentials.json -> stm32_dashboard.py 讀取的 Google service account 金鑰
+jira_config.txt
+credentials.json
+
+# 腳本產出物：執行紀錄（ManualStock.py 以附加模式寫入）
+execution_log.txt
+
+# 腳本產出物：截圖暫存資料夾與打包後的 zip
+# 檔名時間格式為 %Y-%m-%d_%H-%M；正常流程結束會自行刪除資料夾，中途失敗才會殘留
+screenshots/
+Search_*.zip
+20??-??-??_??-??_*.zip
+20??-??-??_??-??_*/
