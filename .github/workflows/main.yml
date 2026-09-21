@@ -1,49 +1,91 @@
 name: DailyStockBot
 
+# 🔀 本檔案整併了原本的 DailyStockBot (main.yml) 與 DailyStockPush (daily_stock.yml)。
+#    DailyStockBot.py  全市場掃描 → 寫入 Google Sheets 的 WATCH_LIST
+#    DailyStockPush.py 讀回 WATCH_LIST → AI 戰略報告 → 寫報表 + 寄信 + LINE 推播
+#    兩者靠 WATCH_LIST 串接，必須「先掃描後推播」，所以改成同一個 job 依序執行；
+#    原本兩條 workflow 各自排程（16:10 / 16:20）只差 10 分鐘，掃描還沒跑完推播就會讀到半套資料。
+
 on:
-  #schedule:
-    #- cron: '10 08 * * 1-5' # 台北時間 16:10 執行 (UTC 08:10)
+  # ⚡ 排程與 repository_dispatch 觸發時 inputs 是空字串，一律套用預設值（見「解析執行計畫」步驟）
+  #    合併後只需要一條 cron 就能跑完整條 pipeline，不必再留 16:20 那條。
+  # schedule:
+  #   - cron: '10 08 * * 1-5' # 台北時間 16:10 執行 (UTC 08:10)
   workflow_dispatch:
+    inputs:
+      stage:
+        description: '執行階段：full = 掃描+推播 / scan = 僅全市場掃描 / push = 僅 AI 戰略推播'
+        type: choice
+        required: true
+        default: 'full'
+        options:
+          - full
+          - scan
+          - push
+      ai_provider:
+        description: '🤖 AI 診斷服務：none = 不啟用 (節省 Token) / cursor = 消耗 Cursor Token / gemini = 消耗 Gemini Token'
+        type: choice
+        required: true
+        default: 'none'
+        options:
+          - none
+          - cursor
+          - gemini
+  repository_dispatch:
+    types: [trigger-push]
 
 permissions:
   contents: read
 
 jobs:
-  analyze:
+  daily_stock:
     runs-on: ubuntu-latest
-    timeout-minutes: 180 
+    # 掃描階段原本 180 分鐘、推播階段原本 90 分鐘，合併成一個 job 後取兩者總和
+    timeout-minutes: 270
     steps:
       - name: 1. 檢出代碼
-        uses: actions/checkout@v4 # 🚀 升級至 v4
+        uses: actions/checkout@v4
 
       - name: 2. 設定 Python
-        uses: actions/setup-python@v5 # 🚀 升級至 v5
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip' # ⚡ [全新優化] 開啟快取，加速後續套件安裝速度
+          cache: 'pip' # ⚡ 開啟快取，加速後續套件安裝速度
 
-      - name: 3. 安裝必要套件
+      - name: 3. 解析執行計畫
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RAW_STAGE: ${{ github.event.inputs.stage }}
+          RAW_AI_PROVIDER: ${{ github.event.inputs.ai_provider }}
+        run: python scripts/resolve_daily_stock_plan.py
+
+      - name: 4. 安裝必要套件
         run: |
           python -m pip install --upgrade pip
-          # 🚀 [修正] 補上新版 Push 腳本不可或缺的 google-genai 官方 SDK
-          pip install yfinance pandas requests FinMind tqdm gspread oauth2client numpy google-genai
+          pip install -U yfinance pandas numpy requests FinMind tqdm gspread oauth2client google-genai
 
-      # [已移除] 4. 建立 Google 金鑰檔案 (不需要了，且比較安全)
+      # [已移除] 建立 Google 金鑰檔案 (不需要了，且比較安全)
+      # GOOGLE_SHEETS_JSON 整包 JSON 直接以環境變數傳給腳本，不落地成 .json 檔
 
-      - name: 5. 執行股票分析 (Bot)
+      - name: 5. 執行全市場掃描 (DailyStockBot)
+        if: steps.plan.outputs.run_scan == 'true'
         env:
+          PYTHONUNBUFFERED: "1"
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
         run: python DailyStockBot.py
 
-      - name: 6. 執行 AI 戰略體檢與推播 (Push)
+      - name: 6. 執行 AI 戰略體檢與推播 (DailyStockPush)
+        if: steps.plan.outputs.run_push == 'true'
         env:
           PYTHONUNBUFFERED: "1"
-          ENABLE_AI: "true"
-          AI_PROVIDER: "cursor"
+          ENABLE_AI: ${{ steps.plan.outputs.enable_ai }}
+          AI_PROVIDER: ${{ steps.plan.outputs.ai_provider }}
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
