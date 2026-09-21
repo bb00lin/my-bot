@@ -494,6 +494,153 @@ def verify_watch_list_reading() -> None:
         check(f"parse_cost({raw!r}) == {expected}", got == expected, str(got))
 
 
+class FakeCostSheet:
+    """模擬 Google Sheets 的格線上限：超出現有欄數的寫入會被擋掉。"""
+
+    def __init__(self, header, col_count):
+        self.header = list(header)
+        self.col_count = col_count
+        self.appended = []
+        self.resized_to = None
+        self.formatted = []
+
+    def _guard_columns(self, needed, what):
+        if needed > self.col_count:
+            raise RuntimeError(f"Range ({what}) exceeds grid limits. Max columns: {self.col_count}")
+
+    @staticmethod
+    def _range_width(range_name):
+        end = range_name.split(":")[-1]
+        letters = "".join(c for c in end if c.isalpha()).upper()
+        return ord(letters[-1]) - ord("A") + 1 if letters else 0
+
+    def row_values(self, index):
+        row = list(self.header)
+        while row and row[-1] == "":
+            row.pop()
+        return row
+
+    def update(self, *args, **kwargs):
+        if args:
+            raise AssertionError("gspread 6 的 update() 第一個位置參數是 values，必須改用關鍵字")
+        range_name = kwargs["range_name"]
+        self._guard_columns(self._range_width(range_name), range_name)
+        self.header = list(kwargs["values"][0])
+
+    def update_cell(self, row, col, value):
+        self._guard_columns(col, f"cell({row},{col})")
+        while len(self.header) < col:
+            self.header.append("")
+        self.header[col - 1] = value
+
+    def append_row(self, values, value_input_option=None):
+        self._guard_columns(len(values), "append_row")
+        self.appended.append(list(values))
+
+    def resize(self, rows=None, cols=None):
+        if cols:
+            self.col_count = cols
+            self.resized_to = cols
+
+    def format(self, range_name, fmt):
+        self._guard_columns(self._range_width(range_name), range_name)
+        self.formatted.append(range_name)
+
+
+class FakeCostSpreadsheet:
+    def __init__(self, cost_sheet=None):
+        self._cost_sheet = cost_sheet
+        self.added = None
+
+    def worksheet(self, title):
+        if self._cost_sheet is None:
+            raise KeyError(title)
+        return self._cost_sheet
+
+    def add_worksheet(self, title, rows, cols):
+        self.added = {"title": title, "rows": rows, "cols": cols}
+        self._cost_sheet = FakeCostSheet([], col_count=cols)
+        return self._cost_sheet
+
+
+LEGACY_COST_HEADERS = [
+    '執行時間', 'AI 呼叫總次數', '輸入 Token (Prompt)',
+    '輸出 Token (Completion)', '總 Token 消耗', '預估台幣費用 (TWD)',
+]
+
+
+def verify_cost_sheet_logging() -> None:
+    hr("7. Token與費用統計 分頁寫入")
+
+    check("標題列常數包含『AI 提供者』",
+          m.COST_SHEET_HEADERS[:6] == LEGACY_COST_HEADERS
+          and m.COST_SHEET_HEADERS[6] == 'AI 提供者',
+          str(m.COST_SHEET_HEADERS))
+
+    # 舊分頁是舊版 add_worksheet(cols=6) 建的，只有 6 欄
+    sheet = FakeCostSheet(LEGACY_COST_HEADERS, col_count=6)
+    check("前提：6 欄的分頁寫第 7 欄會被格線上限擋下（本次 bug 的成因）",
+          _raises_grid_limit(lambda: sheet.update_cell(1, 7, 'AI 提供者')))
+
+    spreadsheet = FakeCostSpreadsheet(sheet)
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        m.log_execution_cost_to_sheets(spreadsheet, "2026-09-21 18:05", 0.0)
+    log = buffer.getvalue()
+
+    check("會先把舊分頁擴欄再寫入", sheet.resized_to == 7, f"resized_to={sheet.resized_to}")
+    check("標題列補上『AI 提供者』", sheet.header == m.COST_SHEET_HEADERS, str(sheet.header))
+    check("成功寫入 1 筆成本紀錄", len(sheet.appended) == 1, f"appended={sheet.appended}")
+    if sheet.appended:
+        row = sheet.appended[0]
+        check("成本紀錄有 7 個欄位", len(row) == 7, str(row))
+        check("第一欄是執行時間", row[0] == "2026-09-21 18:05", str(row[0]))
+        check("最後一欄是 AI 提供者標籤", row[6] == m.get_ai_provider_label(), str(row[6]))
+    check("寫入成功會印出確認訊息", "✅" in log and m.COST_SHEET_TITLE in log, log.strip())
+
+    # 已經是 7 欄且標題正確時不該重複擴欄或改標題
+    ready = FakeCostSheet(m.COST_SHEET_HEADERS, col_count=7)
+    with redirect_stdout(io.StringIO()):
+        m.log_execution_cost_to_sheets(FakeCostSpreadsheet(ready), "2026-09-21 18:10", 1.5)
+    check("標題已正確時不重複擴欄", ready.resized_to is None, f"resized_to={ready.resized_to}")
+    check("標題已正確時仍寫入紀錄", len(ready.appended) == 1, f"appended={ready.appended}")
+
+    # 分頁不存在時要能自己建立，且一次就開滿欄數
+    fresh = FakeCostSpreadsheet(None)
+    with redirect_stdout(io.StringIO()):
+        m.log_execution_cost_to_sheets(fresh, "2026-09-21 18:15", 0.0)
+    check("分頁不存在時會自動建立並開滿 7 欄",
+          fresh.added == {"title": m.COST_SHEET_TITLE, "rows": 1000, "cols": 7},
+          str(fresh.added))
+    check("新建分頁會寫入標題列與紀錄",
+          fresh._cost_sheet.appended[0] == m.COST_SHEET_HEADERS
+          and len(fresh._cost_sheet.appended) == 2,
+          str(fresh._cost_sheet.appended))
+
+    # 失敗不能再被 except: pass 吞掉
+    broken = FakeCostSheet(m.COST_SHEET_HEADERS, col_count=7)
+
+    def blow_up(*args, **kwargs):
+        raise RuntimeError("Quota exceeded for quota metric 'Write requests'")
+
+    broken.append_row = blow_up
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        m.log_execution_cost_to_sheets(FakeCostSpreadsheet(broken), "2026-09-21 18:20", 0.0)
+    log = buffer.getvalue()
+    check("寫入失敗會印出原因（原本是 except: pass 靜默吞掉）",
+          "⚠️" in log and "Quota exceeded" in log, log.strip())
+    check("寫入失敗不會讓整個推播階段中斷", True)
+
+
+def _raises_grid_limit(fn):
+    try:
+        fn()
+        return False
+    except RuntimeError as exc:
+        return "exceeds grid limits" in str(exc)
+
+
 def main() -> int:
     verify_watch_list_etfs()
     verify_thresholds()
@@ -501,6 +648,7 @@ def main() -> int:
     verify_none_safe_consumers()
     verify_stage_routing()
     verify_watch_list_reading()
+    verify_cost_sheet_logging()
 
     hr("驗證結果")
     print(f"PASS: {PASS}    FAIL: {FAIL}")
