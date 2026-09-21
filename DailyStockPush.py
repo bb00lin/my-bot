@@ -413,18 +413,63 @@ def get_vol_status_str(ratio):
     elif ratio < 0.7: return f"⚠️窒息量縮({ratio:.1f}x)"
     else: return f"☁️量平({ratio:.1f}x)"
 
+# ==========================================
+# 歷史資料長度防護
+# 新上市標的（例如剛掛牌的主動式 ETF）歷史天數不足，原本整檔會被靜默丟棄；
+# 改成「算得出來的指標照算、算不出來的欄位留空」，並把原因印在 log 上。
+# ==========================================
+MIN_HISTORY_DAYS = 60       # 觀察名單門檻，與 DailyStockBot.py 選股時的 60 天一致
+MIN_HISTORY_DAYS_HOLD = 20  # 庫存持股放寬到月線，手動填進 WATCH_LIST 的部位不該消失
+NO_DATA_TEXT = "資料不足"
+
+def safe_ma(close, window, offset=-1):
+    """均線；資料不足就回 None，避免 NaN 汙染後續比較與格式化。"""
+    if len(close) < window + abs(offset) - 1: return None
+    value = close.rolling(window).mean().iloc[offset]
+    return None if pd.isna(value) else round(float(value), 2)
+
+def safe_return(close, lookback):
+    """lookback 個交易日前到今天的報酬率；歷史不夠長回 None（原本 iloc[-121] 會 IndexError）。"""
+    if len(close) <= lookback: return None
+    base = close.iloc[-(lookback + 1)]
+    if pd.isna(base) or base == 0: return None
+    return (close.iloc[-1] / base) - 1
+
+def safe_rsi(close, window=14):
+    if len(close) < window + 1: return None
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0).rolling(window).mean().iloc[-1]
+    loss = (-delta.where(delta < 0, 0)).rolling(window).mean().iloc[-1]
+    if pd.isna(gain) or pd.isna(loss): return None
+    if loss == 0: return 50.0
+    return round(100 - (100 / (1 + (gain / loss))), 1)
+
+def fmt_value(value):
+    """AI prompt 與文字欄位用：缺值顯示為「資料不足」而不是 None。"""
+    return NO_DATA_TEXT if value is None else value
+
+def fmt_pct(value):
+    return NO_DATA_TEXT if value is None else f"{value:+.1f}%"
+
+def fmt_ratio(value):
+    return NO_DATA_TEXT if value is None else f"{value:.2%}"
+
+def sheet_value(value):
+    """Google Sheets 數值欄位：缺值留空白，不要寫入 None 或 nan。"""
+    return "" if value is None else value
+
 def check_ma_status(p, ma5, ma10, ma20, ma60):
     alerts = []
     THRESHOLD = 0.015 
-    if ma5 > 0:
+    if ma5:
         gap = (p - ma5) / ma5
         if 0 < gap <= THRESHOLD: alerts.append(f"⚡回測5日線(剩{gap:.1%})")
         elif -THRESHOLD <= gap < 0: alerts.append(f"⚠️跌破5日線({gap:.1%})")
-    if ma20 > 0:
+    if ma20:
         gap = (p - ma20) / ma20
         if 0 < gap <= THRESHOLD: alerts.append(f"🛡️回測月線(剩{gap:.1%})")
         elif -THRESHOLD <= gap < 0: alerts.append(f"☠️跌破月線({gap:.1%})")
-    if ma60 > 0 and abs((p - ma60) / ma60) > 0.15: 
+    if ma60 and abs((p - ma60) / ma60) > 0.15: 
         alerts.append("🔥乖離過大" if p > ma60 else "❄️嚴重超跌")
     return " | ".join(alerts) if alerts else ""
 
@@ -446,11 +491,12 @@ def check_golden_entry(df_hist):
 def get_limit_up_potential(r):
     score = 0
     reasons = []
-    if r['p'] > r['ma5'] and r['ma5'] > r['ma10'] and r['ma10'] > r['ma20']: score += 30; reasons.append("🔥均線多頭發散")
+    ma5, ma10, ma20 = r.get('ma5'), r.get('ma10'), r.get('ma20')
+    if None not in (ma5, ma10, ma20) and r['p'] > ma5 and ma5 > ma10 and ma10 > ma20: score += 30; reasons.append("🔥均線多頭發散")
     if r['ss'] > 0: score += 30; reasons.append("🏦投信點火")
     elif r['fs'] >= 3: score += 20; reasons.append("💰外資連買")
     if r['vol_r'] >= 1.8: score += 20; reasons.append("📈出量攻擊")
-    if r['d1'] > 0.03: score += 20; reasons.append("🚀長紅棒")
+    if r['d1'] is not None and r['d1'] > 0.03: score += 20; reasons.append("🚀長紅棒")
     return score, " | ".join(reasons)
 
 def get_ai_strategy(data):
@@ -464,7 +510,7 @@ def get_ai_strategy(data):
     if data['is_hold']:
         roi = ((data['p'] - data['cost']) / data['cost']) * 100
         profit_info = f"🔴庫存持有中 (成本:{data['cost']} | 現價:{data['p']} | 損益:{roi:+.2f}%)"
-    prompt = f"針對個股 {data['name']} ({data['id']}) 進行短線診斷。現價：{data['p']}，5日線: {data['ma5']}，20日線: {data['ma20']}。{profit_info}。請給出約 80 字操作建議與明確防守價。"
+    prompt = f"針對個股 {data['name']} ({data['id']}) 進行短線診斷。現價：{data['p']}，5日線: {fmt_value(data['ma5'])}，20日線: {fmt_value(data['ma20'])}。{profit_info}。請給出約 80 字操作建議與明確防守價。"
     result = generate_ai_content(prompt)
     return result if result else "AI 連線忙碌中"
 
@@ -484,17 +530,17 @@ def generate_and_save_summary(data_list, report_time_str):
         try:
             stock_info = (
                 f"- {r['name']}({r['id']}) | 現價:{r['p']} | 分數:{r['score']} | "
-                f"MA5:{r['ma5']} | MA10:{r['ma10']} | MA20:{r['ma20']} | MA60:{r['ma60']} | "
-                f"日漲跌:{r['d1']:.2%} | 外資:{r['fs']}d 投信:{r['ss']}d | "
+                f"MA5:{fmt_value(r['ma5'])} | MA10:{fmt_value(r['ma10'])} | MA20:{fmt_value(r['ma20'])} | MA60:{fmt_value(r['ma60'])} | "
+                f"日漲跌:{fmt_ratio(r['d1'])} | 外資:{r['fs']}d 投信:{r['ss']}d | "
                 f"今日量:{r.get('v_today',0)}張 (量比:{r['vol_r']}x) | 訊號:{r['ma_alert']}\n"
             )
             if r['is_hold']: inventory_txt += stock_info
             else: watchlist_txt += stock_info
                 
-            if r['is_golden']: golden_candidates += f"- {r['name']}({r['id']}) [今日成交:{r.get('v_today',0)}張]: {r['golden_msg']} (防守MA20: {r['ma20']})\n"
+            if r['is_golden']: golden_candidates += f"- {r['name']}({r['id']}) [今日成交:{r.get('v_today',0)}張]: {r['golden_msg']} (防守MA20: {fmt_value(r['ma20'])})\n"
             
             if r.get('is_long_term'):
-                long_term_candidates_txt += f"- {r['name']}({r['id']}) [今日成交:{r.get('v_today',0)}張]: 🌊主力大週期鎖籌碼 (量{r['vol_r']}x) | 防守: {r['ma20']}\n"
+                long_term_candidates_txt += f"- {r['name']}({r['id']}) [今日成交:{r.get('v_today',0)}張]: 🌊主力大週期鎖籌碼 (量{r['vol_r']}x) | 防守: {fmt_value(r['ma20'])}\n"
             
             limit_up_score, limit_up_reason = get_limit_up_potential(r)
             if limit_up_score >= 60:
@@ -504,12 +550,14 @@ def generate_and_save_summary(data_list, report_time_str):
                 incubation_txt += f"- {r['name']}({r['id']}) [今日成交:{r.get('v_today',0)}張]: 籌碼連買(外{r['fs']}投{r['ss']}) | 乖離月線僅{r['bias_20_str']} | 量能溫和{r['vol_r']}x\n"
                 
             if r.get('is_first_golden_cross'):
-                first_golden_cross_txt += f"- {r['name']}({r['id']}) [今日成交:{r.get('v_today',0)}張]: MA5({r['ma5']}) 剛穿越 MA20({r['ma20']}) 第一天 | 今日漲幅:{r['d1']:.2%}\n"
+                first_golden_cross_txt += f"- {r['name']}({r['id']}) [今日成交:{r.get('v_today',0)}張]: MA5({fmt_value(r['ma5'])}) 剛穿越 MA20({fmt_value(r['ma20'])}) 第一天 | 今日漲幅:{fmt_ratio(r['d1'])}\n"
                 
             if r.get('is_intraday_breakout'):
-                intraday_breakout_txt += f"- {r['name']}({r['id']}) [今日成交:{r.get('v_today',0)}張]: ⚡動能異動！漲幅達{r['d1']:.2%} | 量暴增{r['vol_r']}x\n"
+                intraday_breakout_txt += f"- {r['name']}({r['id']}) [今日成交:{r.get('v_today',0)}張]: ⚡動能異動！漲幅達{fmt_ratio(r['d1'])} | 量暴增{r['vol_r']}x\n"
 
-        except: continue
+        except Exception as e:
+            print(f"⚠️ 戰略總結略過 {r.get('name')}({r.get('id')})：{type(e).__name__}: {e}")
+            continue
 
     if not incubation_txt: incubation_txt = "今日無符合 [底部潛伏] 標準之標的。"
     if not first_golden_cross_txt: first_golden_cross_txt = "今日無符合 [黃金交叉第一根] 之標的。"
@@ -584,36 +632,48 @@ def generate_and_save_summary(data_list, report_time_str):
 # ==========================================
 def fetch_pro_metrics(stock_data):
     sid, passed_name, is_hold, cost = stock_data['sid'], stock_data['name'], stock_data['is_hold'], stock_data['cost']
+    label = f"{sid} {passed_name}".strip()
     stock, full_id = get_tw_stock(sid)
-    if not stock: return None
+    if not stock:
+        print(f"⚠️ 略過 {label}：yfinance 的 .TW 與 .TWO 都查不到報價")
+        return None
     try:
         df_hist = stock.history(period="8mo")
-        if len(df_hist) < 120: return None
+        days = len(df_hist)
+        min_days = MIN_HISTORY_DAYS_HOLD if is_hold else MIN_HISTORY_DAYS
+        if days < min_days:
+            scope = "庫存" if is_hold else "觀察"
+            print(f"⚠️ 略過 {label}：8 個月內只有 {days} 個交易日，未達{scope}門檻 {min_days} 天")
+            return None
+        if days < MIN_HISTORY_DAYS:
+            print(f"🆕 {label} 為新上市標的（僅 {days} 個交易日），季線與長天期欄位將留空")
+
         info = stock.info
+        close = df_hist['Close']
         latest = df_hist.iloc[-1]
-        prev = df_hist.iloc[-2]
         curr_p, curr_vol = latest['Close'], latest['Volume']
         today_amount = (curr_vol * curr_p) / 100_000_000
-        
-        delta = df_hist['Close'].diff()
-        gain, loss = delta.where(delta > 0, 0).rolling(14).mean(), (-delta.where(delta < 0, 0)).rolling(14).mean()
-        clean_rsi = round(100 - (100 / (1 + (gain.iloc[-1] / loss.iloc[-1]))), 1) if loss.iloc[-1] != 0 else 50.0
-        
+
+        clean_rsi = safe_rsi(close)
+
         # 取得均線
-        ma5 = round(df_hist['Close'].rolling(5).mean().iloc[-1], 2)
-        ma10 = round(df_hist['Close'].rolling(10).mean().iloc[-1], 2)
-        ma20 = round(df_hist['Close'].rolling(20).mean().iloc[-1], 2)
-        ma60 = round(df_hist['Close'].rolling(60).mean().iloc[-1], 2)
-        
+        ma5 = safe_ma(close, 5)
+        ma10 = safe_ma(close, 10)
+        ma20 = safe_ma(close, 20)
+        ma60 = safe_ma(close, 60)
+
         # 昨日均線
-        ma5_prev = round(df_hist['Close'].rolling(5).mean().iloc[-2], 2)
-        ma20_prev = round(df_hist['Close'].rolling(20).mean().iloc[-2], 2)
-        ma60_prev = round(df_hist['Close'].rolling(60).mean().iloc[-2], 2)
-        
-        bias_60 = ((curr_p - ma60) / ma60) * 100
-        bias_20 = ((curr_p - ma20) / ma20) * 100
+        ma5_prev = safe_ma(close, 5, offset=-2)
+        ma20_prev = safe_ma(close, 20, offset=-2)
+        ma60_prev = safe_ma(close, 60, offset=-2)
+
+        bias_60 = ((curr_p - ma60) / ma60) * 100 if ma60 else None
+        bias_20 = ((curr_p - ma20) / ma20) * 100 if ma20 else None
         
         ma_alert_str = check_ma_status(curr_p, ma5, ma10, ma20, ma60)
+        if days < MIN_HISTORY_DAYS:
+            new_listing_tag = f"🆕上市僅{days}日"
+            ma_alert_str = f"{ma_alert_str} | {new_listing_tag}" if ma_alert_str else new_listing_tag
         is_golden, golden_msg = check_golden_entry(df_hist)
         raw_yield = info.get('dividendYield', 0) or 0
         
@@ -625,20 +685,20 @@ def fetch_pro_metrics(stock_data):
         fs_streak, ss_streak, fs_days, ss_days = get_inst_stats(pure_id) 
 
         # 🚀【新增引擎 A】底部主力潛伏區
-        is_incubation = (abs(bias_20) <= 3.0) and (fs_streak >= 3 or ss_streak >= 3) and (1.0 <= vol_ratio <= 1.6)
+        is_incubation = (bias_20 is not None and abs(bias_20) <= 3.0) and (fs_streak >= 3 or ss_streak >= 3) and (1.0 <= vol_ratio <= 1.6)
         
         # 🚀【新增引擎 B】均線初升第一根
-        is_first_golden_cross = (ma5_prev <= ma20_prev) and (ma5 > ma20) and (curr_p > latest['Open'])
+        is_first_golden_cross = None not in (ma5, ma20, ma5_prev, ma20_prev) and (ma5_prev <= ma20_prev) and (ma5 > ma20) and (curr_p > latest['Open'])
         
         # 🚀【新增引擎 C】盤中動能即時雷達
-        d1_change = (curr_p / prev['Close']) - 1
-        is_intraday_breakout = (d1_change > 0.025) and (vol_ratio > 2.0)
+        d1_change = safe_return(close, 1)
+        is_intraday_breakout = (d1_change is not None and d1_change > 0.025) and (vol_ratio > 2.0)
 
         score = 5
         if (info.get('profitMargins', 0) or 0) > 0: score += 1
-        if curr_p > ma60: score += 1
+        if ma60 is not None and curr_p > ma60: score += 1
         if 0.02 < raw_yield < 0.12: score += 1
-        if 45 < clean_rsi < 68: score += 1
+        if clean_rsi is not None and 45 < clean_rsi < 68: score += 1
         if fs_streak >= 2 or ss_streak >= 1: score += 1
         if is_golden or is_incubation or is_first_golden_cross: score += 3
 
@@ -653,18 +713,19 @@ def fetch_pro_metrics(stock_data):
         vol_ma5_lots = int(vol_ma5_val / 1000) if not pd.isna(vol_ma5_val) else 0
         
         # 長線大妖股
-        is_long_term_trend = (curr_p > ma20 and curr_p > ma60 and ma60 > ma60_prev and (fs_days + ss_days >= 12) and vol_ratio > 1.0)
+        is_long_term_trend = (None not in (ma20, ma60, ma60_prev) and curr_p > ma20 and curr_p > ma60 and ma60 > ma60_prev and (fs_days + ss_days >= 12) and vol_ratio > 1.0)
 
         res = {
             "id": f"{sid}{market_label}", "name": final_stock_name, "score": score, "rsi": clean_rsi, "industry": industry,
             "vol_r": round(vol_ratio, 1), "p": round(curr_p, 2), "yield": raw_yield, "amt_t": round(today_amount, 1),
-            "d1": d1_change, "d5": (curr_p / df_hist['Close'].iloc[-6]) - 1,
-            "m1": (curr_p / df_hist['Close'].iloc[-21]) - 1, "m6": (curr_p / df_hist['Close'].iloc[-121]) - 1,
-            "is_hold": is_hold, "cost": cost, "bias_str": f"{bias_60:+.1f}%", "bias_20_str": f"{bias_20:+.1f}%",
+            "d1": d1_change, "d5": safe_return(close, 5),
+            "m1": safe_return(close, 20), "m6": safe_return(close, 120),
+            "is_hold": is_hold, "cost": cost, "bias_str": fmt_pct(bias_60), "bias_20_str": fmt_pct(bias_20),
             "vol_str": get_vol_status_str(vol_ratio),
             "fs": fs_streak, "ss": ss_streak, "ma5": ma5, "ma10": ma10, "ma20": ma20, "ma60": ma60, "ma_alert": ma_alert_str,
             "is_golden": is_golden, "golden_msg": golden_msg,
             "v_today": vol_today_lots, "v_ma5": vol_ma5_lots,
+            "days": days,
             "is_long_term": is_long_term_trend,
             "is_incubation": is_incubation,
             "is_first_golden_cross": is_first_golden_cross,
@@ -672,12 +733,12 @@ def fetch_pro_metrics(stock_data):
             "skip_ai": stock_data.get('skip_ai', False)
         }
         
-        if bias_60 > 15 or clean_rsi > 75: res["risk"] = "🚨高檔過熱"
-        elif curr_p < ma20: res["risk"] = "⚠️破線警戒"
+        if (bias_60 is not None and bias_60 > 15) or (clean_rsi is not None and clean_rsi > 75): res["risk"] = "🚨高檔過熱"
+        elif ma20 is not None and curr_p < ma20: res["risk"] = "⚠️破線警戒"
         else: res["risk"] = "🟢正常"
             
-        if ma5 > ma10 and ma10 > ma20 and ma20 > ma60: res["trend"] = "📈強勢多頭"
-        elif curr_p < ma60: res["trend"] = "📉空頭修正"
+        if None not in (ma5, ma10, ma20, ma60) and ma5 > ma10 and ma10 > ma20 and ma20 > ma60: res["trend"] = "📈強勢多頭"
+        elif ma60 is not None and curr_p < ma60: res["trend"] = "📉空頭修正"
         else: res["trend"] = "☁️區間震盪"
             
         if is_long_term_trend: res["hint"] = "🌊長線起漲"
@@ -686,11 +747,14 @@ def fetch_pro_metrics(stock_data):
         elif is_first_golden_cross: res["hint"] = "✨均線突破"
         elif is_incubation: res["hint"] = "🌱主力潛伏"
         elif score >= 8: res["hint"] = "🚀強勢進攻"
+        elif days < MIN_HISTORY_DAYS: res["hint"] = "🆕新上市觀察"
         else: res["hint"] = "👀持續追蹤"
         
         res['ai_strategy'] = get_ai_strategy(res)
         return res
-    except: return None
+    except Exception as e:
+        print(f"⚠️ 略過 {label}：指標計算失敗 ({type(e).__name__}: {e})")
+        return None
 
 def get_tw_stock(sid):
     clean_id = str(sid).strip().upper()
@@ -720,14 +784,19 @@ def main():
     current_time = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
     watch_data_list = get_watch_list_from_sheet()
     if not watch_data_list: return
+    print(f"📋 WATCH_LIST 共 {len(watch_data_list)} 檔待分析（庫存 {sum(1 for s in watch_data_list if s['is_hold'])} 檔）")
 
     results_line, results_sheet = [], []
     for idx, stock_data in enumerate(watch_data_list):
         res = fetch_pro_metrics(stock_data)
         if res:
             results_line.append(res)
-            results_sheet.append([current_time, res['id'], res['name'], "📦庫存" if res['is_hold'] else "👀觀察", res['score'], res['rsi'], res['industry'], res['bias_str'], res['vol_str'], res['fs'], res['ss'], res['p'], res['yield'], res['amt_t'], res['d1'], res['d5'], res['m1'], res['m6'], res['risk'], res['trend'], res['hint'], res['ai_strategy']])
+            results_sheet.append([current_time, res['id'], res['name'], "📦庫存" if res['is_hold'] else "👀觀察", res['score'], sheet_value(res['rsi']), res['industry'], res['bias_str'], res['vol_str'], res['fs'], res['ss'], res['p'], res['yield'], res['amt_t'], sheet_value(res['d1']), sheet_value(res['d5']), sheet_value(res['m1']), sheet_value(res['m6']), res['risk'], res['trend'], res['hint'], res['ai_strategy']])
         if idx < len(watch_data_list) - 1: time.sleep(2.0)
+
+    skipped = len(watch_data_list) - len(results_line)
+    print(f"📊 成功納入報表 {len(results_line)} 檔"
+          + (f"，略過 {skipped} 檔（原因見上方 ⚠️ 訊息）" if skipped else ""))
     
     if results_line:
         time.sleep(10) 
