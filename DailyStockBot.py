@@ -444,7 +444,8 @@ def record_token_usage(response):
             GLOBAL_TOKEN_BILLING["completion_tokens"] += meta.candidates_token_count
             GLOBAL_TOKEN_BILLING["total_tokens"] += meta.total_token_count
             GLOBAL_TOKEN_BILLING["api_calls"] += 1
-    except: pass
+    except Exception as e:
+        print(f"⚠️ Token 用量統計失敗 ({type(e).__name__}: {e})")
 
 def get_ai_provider_label():
     if ACTIVE_AI_PROVIDER == "cursor":
@@ -743,30 +744,34 @@ def sync_diagnostic_sheet(data_list):
         print(f"⚠️ '全能金流診斷報表' 同步失敗: {e}")
         return None
 
+COST_SHEET_TITLE = "Token與費用統計"
+COST_SHEET_HEADERS = [
+    '執行時間', 'AI 呼叫總次數', '輸入 Token (Prompt)',
+    '輸出 Token (Completion)', '總 Token 消耗', '預估台幣費用 (TWD)', 'AI 提供者',
+]
+
 def log_execution_cost_to_sheets(spreadsheet, current_time, twd_cost):
+    header_range = f"A1:{chr(ord('A') + len(COST_SHEET_HEADERS) - 1)}1"
     try:
-        base_headers = [
-            '執行時間', 'AI 呼叫總次數', '輸入 Token (Prompt)',
-            '輸出 Token (Completion)', '總 Token 消耗', '預估台幣費用 (TWD)',
-        ]
         try:
-            cost_sheet = spreadsheet.worksheet("Token與費用統計")
+            cost_sheet = spreadsheet.worksheet(COST_SHEET_TITLE)
         except Exception:
-            cost_sheet = spreadsheet.add_worksheet(title="Token與費用統計", rows=1000, cols=7)
-            cost_sheet.append_row(base_headers + ['AI 提供者'])
+            cost_sheet = spreadsheet.add_worksheet(title=COST_SHEET_TITLE, rows=1000, cols=len(COST_SHEET_HEADERS))
+            cost_sheet.append_row(COST_SHEET_HEADERS)
             cost_sheet.format(
-                "A1:G1",
+                header_range,
                 {"textFormat": {"bold": True}, "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}, "horizontalAlignment": "CENTER"},
             )
         else:
-            headers = cost_sheet.row_values(1)
-            if len(headers) < 6:
-                cost_sheet.update("A1:F1", [base_headers])
-            if len(headers) < 7 or (len(headers) >= 7 and headers[6] != 'AI 提供者'):
-                cost_sheet.update_cell(1, 7, 'AI 提供者')
+            # 舊版分頁只有 6 欄，不先擴欄就寫第 7 欄會被 Google Sheets 以「超出格線範圍」擋掉
+            if cost_sheet.col_count < len(COST_SHEET_HEADERS):
+                cost_sheet.resize(cols=len(COST_SHEET_HEADERS))
+                print(f"⚡ 已將[{COST_SHEET_TITLE}]擴增至 {len(COST_SHEET_HEADERS)} 欄")
+            if cost_sheet.row_values(1) != COST_SHEET_HEADERS:
+                # gspread 6 的 update() 第一個位置參數是 values，一律用關鍵字避免順序顛倒
+                cost_sheet.update(values=[COST_SHEET_HEADERS], range_name=header_range)
+                print(f"🔄 已更新[{COST_SHEET_TITLE}]標題列")
 
-        provider_label = get_ai_provider_label()
-        cost_display = get_cost_display_for_sheet(twd_cost)
         cost_sheet.append_row(
             [
                 current_time,
@@ -774,13 +779,14 @@ def log_execution_cost_to_sheets(spreadsheet, current_time, twd_cost):
                 GLOBAL_TOKEN_BILLING["prompt_tokens"],
                 GLOBAL_TOKEN_BILLING["completion_tokens"],
                 GLOBAL_TOKEN_BILLING["total_tokens"],
-                cost_display,
-                provider_label,
+                get_cost_display_for_sheet(twd_cost),
+                get_ai_provider_label(),
             ],
             value_input_option='USER_ENTERED',
         )
-    except Exception:
-        pass
+        print(f"✅ 已寫入[{COST_SHEET_TITLE}] 1 筆成本紀錄")
+    except Exception as e:
+        print(f"⚠️ 寫入[{COST_SHEET_TITLE}]失敗 ({type(e).__name__}: {e})")
 
 def get_watch_list_from_sheet():
     try:
