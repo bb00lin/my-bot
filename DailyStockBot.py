@@ -262,6 +262,31 @@ def sheet_value(value):
     """Google Sheets 數值欄位：缺值留空白，不要寫入 None 或 nan。"""
     return "" if value is None else value
 
+def normalize_stock_id(raw_sid):
+    """補回被 Google Sheets 存成數字而丟掉的前導零（0050 存成 50、00878 存成 878）。
+
+    代號本身是文字（含字母或已帶前導零）時原樣返回。
+    """
+    sid = str(raw_sid).strip()
+    if not sid.isdigit():
+        return sid
+    if len(sid) == 3:
+        return "00" + sid    # 00878 這類 5 碼 ETF
+    if len(sid) < 4:
+        return sid.zfill(4)  # 0050 這類 4 碼 ETF
+    return sid
+
+def parse_cost(value):
+    """平均成本：關閉數值轉換後拿到的是字串，可能還帶有千分位或貨幣符號。"""
+    if value is None: return 0.0
+    text = str(value).strip().replace(",", "").replace("NT$", "").replace("$", "")
+    if not text: return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        print(f"⚠️ 平均成本無法解析：{value!r}，以 0 計算")
+        return 0.0
+
 
 # ==========================================
 # 2. AI 引擎（Gemini / Cursor 二選一）
@@ -776,8 +801,12 @@ def get_watch_list_from_sheet():
         try: sheet = spreadsheet.worksheet("WATCH_LIST")
         except: sheet = spreadsheet.get_worksheet(0)
 
+        # ⚠️ gspread 預設會把純數字字串轉成 int，'009824' 會變成 9824，
+        #    yfinance 就查不到 009824.TW。numericise_ignore 保留儲存格原始文字。
+        records = sheet.get_all_records(numericise_ignore=['all'])
+
         watch_data = []
-        for row in sheet.get_all_records():
+        for row in records:
             raw_sid = str(row.get('股票代號', '')).strip()
             raw_name = str(row.get('股票名稱', row.get('名稱', ''))).strip()
             if not raw_sid: continue
@@ -788,9 +817,10 @@ def get_watch_list_from_sheet():
                 has_hash_tag = True
                 raw_sid = raw_sid.replace('#', '').strip()
 
-            sid = "00" + raw_sid if len(raw_sid) == 3 else (raw_sid.zfill(4) if len(raw_sid) < 4 else raw_sid)
+            sid = normalize_stock_id(raw_sid)
+            if sid != raw_sid:
+                print(f"🔧 代號補零 '{raw_sid}' -> '{sid}'（該儲存格在 Google Sheets 被存成數字）")
             is_hold = str(row.get('我的庫存倉位', '')).strip().upper() == 'Y'
-            cost = row.get('平均成本', 0)
 
             # 🛡️ 核心防禦：自動比對黑名單或帶有 # 號
             skip_ai = has_hash_tag or (raw_sid in blacklist) or (sid in blacklist)
@@ -799,7 +829,7 @@ def get_watch_list_from_sheet():
                 'sid': sid,
                 'name': raw_name,
                 'is_hold': is_hold,
-                'cost': float(cost) if cost else 0,
+                'cost': parse_cost(row.get('平均成本')),
                 'skip_ai': skip_ai
             })
         return watch_data
