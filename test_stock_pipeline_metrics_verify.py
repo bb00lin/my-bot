@@ -366,12 +366,141 @@ def verify_stage_routing() -> None:
         os.environ.pop("STAGE", None)
 
 
+def _gspread_numericise(value):
+    """複製 gspread.utils.numericise 對純數字字串的行為（'009824' -> 9824）。"""
+    if not isinstance(value, str):
+        return value
+    try:
+        return int(value)
+    except ValueError:
+        try:
+            return float(value)
+        except ValueError:
+            return value
+
+
+class FakeWorksheet:
+    def __init__(self, header, rows):
+        self.header = header
+        self.rows = rows
+        self.received_kwargs = None
+
+    def get_all_records(self, **kwargs):
+        # 模擬 gspread：預設把純數字字串轉成 int，除非 numericise_ignore=['all']
+        self.received_kwargs = kwargs
+        rows = self.rows
+        if kwargs.get("numericise_ignore") != ["all"]:
+            rows = [[_gspread_numericise(v) for v in row] for row in rows]
+        return [dict(zip(self.header, row)) for row in rows]
+
+    def col_values(self, index):
+        return []
+
+
+class FakeSpreadsheet:
+    def __init__(self, worksheet):
+        self._worksheet = worksheet
+
+    def worksheet(self, title):
+        if title == "WATCH_LIST":
+            return self._worksheet
+        raise KeyError(title)  # AI_Blacklist 不存在時要能繼續
+
+    def get_worksheet(self, index):
+        return self._worksheet
+
+
+class FakeClient:
+    def __init__(self, worksheet):
+        self._worksheet = worksheet
+
+    def open(self, title):
+        return FakeSpreadsheet(self._worksheet)
+
+
+def verify_watch_list_reading() -> None:
+    hr("6. WATCH_LIST 讀取：代號的前導零不能掉")
+
+    check(
+        "前提：gspread 預設會把 '009824' 轉成 9824（本次 bug 的成因）",
+        _gspread_numericise("009824") == 9824,
+    )
+    check(
+        "前提：含字母的 '00403A' 不會被轉換，所以只有純數字代號受害",
+        _gspread_numericise("00403A") == "00403A",
+    )
+    check(
+        "前提：轉換過的 9824 無法事後補零（和真實 4 碼股票 9824 無法區分）",
+        m.normalize_stock_id("9824") == "9824",
+    )
+
+    header = ['股票代號', '股票名稱', '我的庫存倉位', '平均成本', '股數', '推薦理由', '日期']
+    rows = [
+        ['00403A', '主動統一升級50', 'Y', '10', '10000', '', ''],
+        ['00409A', '主動復華全球50', 'Y', '10', '20000', '', ''],
+        ['009824', '群益美國科技巨頭', 'Y', '10', '50000', '', ''],
+        ['00997A', '主動群益美國增長', 'Y', '10', '50000', '', ''],
+        ['2330', '台積電', '', '', '', 'AI穩健', '2026-09-21'],
+        ['#6165', '浪凡', '', '', '', 'AI穩健', '2026-09-21'],
+    ]
+    worksheet = FakeWorksheet(header, rows)
+    original_client = m.get_gspread_client
+    m.get_gspread_client = lambda: FakeClient(worksheet)
+    try:
+        with redirect_stdout(io.StringIO()):
+            watch = m.get_watch_list_from_sheet()
+    finally:
+        m.get_gspread_client = original_client
+
+    check("讀到全部 6 列", len(watch) == 6, f"實際={len(watch)}")
+    check(
+        "有關閉 gspread 的數值轉換",
+        worksheet.received_kwargs == {"numericise_ignore": ["all"]},
+        f"實際傳入={worksheet.received_kwargs}",
+    )
+
+    by_name = {row['name']: row for row in watch}
+    check(
+        "009824 群益美國科技巨頭 的代號保留前導零",
+        by_name.get('群益美國科技巨頭', {}).get('sid') == '009824',
+        str(by_name.get('群益美國科技巨頭')),
+    )
+    for name, sid in (('主動統一升級50', '00403A'), ('主動復華全球50', '00409A'),
+                      ('主動群益美國增長', '00997A'), ('台積電', '2330')):
+        check(f"{sid} {name} 代號正確", by_name.get(name, {}).get('sid') == sid, str(by_name.get(name)))
+
+    check("四檔庫存都標記為 is_hold",
+          sum(1 for r in watch if r['is_hold']) == 4,
+          f"實際={sum(1 for r in watch if r['is_hold'])}")
+    check("平均成本以字串傳入仍解析為數字",
+          by_name.get('群益美國科技巨頭', {}).get('cost') == 10.0,
+          str(by_name.get('群益美國科技巨頭', {}).get('cost')))
+    check("觀察股沒填成本時以 0 計算", by_name.get('台積電', {}).get('cost') == 0.0)
+    check("'#' 前綴仍會關閉該檔的 AI 分析",
+          by_name.get('浪凡', {}).get('skip_ai') is True
+          and by_name.get('浪凡', {}).get('sid') == '6165',
+          str(by_name.get('浪凡')))
+
+    # 儲存格真的被存成數字時，補零邏輯仍是最後一道防線
+    for raw, expected in (('009824', '009824'), ('00403A', '00403A'), ('2330', '2330'),
+                          ('50', '0050'), ('878', '00878')):
+        check(f"normalize_stock_id({raw!r}) == {expected!r}",
+              m.normalize_stock_id(raw) == expected, m.normalize_stock_id(raw))
+
+    for raw, expected in ((None, 0.0), ('', 0.0), ('10', 10.0), (10, 10.0),
+                          ('1,234.5', 1234.5), ('NT$10', 10.0), ('abc', 0.0)):
+        with redirect_stdout(io.StringIO()):
+            got = m.parse_cost(raw)
+        check(f"parse_cost({raw!r}) == {expected}", got == expected, str(got))
+
+
 def main() -> int:
     verify_watch_list_etfs()
     verify_thresholds()
     verify_skip_logging()
     verify_none_safe_consumers()
     verify_stage_routing()
+    verify_watch_list_reading()
 
     hr("驗證結果")
     print(f"PASS: {PASS}    FAIL: {FAIL}")
