@@ -4,11 +4,12 @@
 
 驗證三件事：
 1. scripts/resolve_daily_stock_plan.py 的真值表，涵蓋合併前四種觸發情境的等價行為。
-2. .github/workflows/main.yml 的結構：觸發條件、階段開關、secrets 覆蓋率、套件覆蓋率。
-3. DailyStockBot.py / DailyStockPush.py 的契約：ENABLE_AI 語意與 WATCH_LIST 的先後依賴。
+2. .github/workflows/main.yml 的結構：觸發條件、階段傳遞、secrets 覆蓋率、套件覆蓋率。
+3. DailyStockBot.py 的契約：stage 詞彙一致、ENABLE_AI 語意、WATCH_LIST 的先後依賴。
 
-不 import DailyStockPush（它在 module 層就會呼叫 FinMind 抓台股清單），
-腳本端一律用原始碼比對，必要時只取出被測運算式單獨評估。
+腳本端一律用原始碼比對，必要時只取出被測運算式單獨評估
+（DailyStockBot.py 要 import 得先備好 yfinance / FinMind / gspread 等第三方套件，
+ 完整的行為驗證見 test_stock_pipeline_metrics_verify.py）。
 """
 
 from __future__ import annotations
@@ -26,10 +27,10 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent
 WORKFLOW = ROOT / ".github" / "workflows" / "main.yml"
-MERGED_AWAY = ROOT / ".github" / "workflows" / "daily_stock.yml"
+WORKFLOW_MERGED_AWAY = ROOT / ".github" / "workflows" / "daily_stock.yml"
 PLAN_SCRIPT = ROOT / "scripts" / "resolve_daily_stock_plan.py"
-SCAN_SCRIPT = ROOT / "DailyStockBot.py"
-PUSH_SCRIPT = ROOT / "DailyStockPush.py"
+PIPELINE_SCRIPT = ROOT / "DailyStockBot.py"
+SCRIPT_MERGED_AWAY = ROOT / "DailyStockPush.py"
 
 SECRET_NAMES = (
     "GOOGLE_SHEETS_JSON",
@@ -78,50 +79,42 @@ def verify_plan_logic() -> None:
         (
             "合併前 DailyStockBot 手動觸發：掃描+推播、固定用 Cursor",
             "workflow_dispatch", "full", "cursor",
-            {"stage": "full", "run_scan": "true", "run_push": "true",
-             "enable_ai": "true", "ai_provider": "cursor"},
+            {"stage": "full", "enable_ai": "true", "ai_provider": "cursor"},
         ),
         (
             "合併前 DailyStockPush 手動觸發、兩個勾選框都不勾：只推播、不啟用 AI",
             "workflow_dispatch", "push", "none",
-            {"stage": "push", "run_scan": "false", "run_push": "true",
-             "enable_ai": "false", "ai_provider": ""},
+            {"stage": "push", "enable_ai": "false", "ai_provider": ""},
         ),
         (
             "合併前 DailyStockPush 手動觸發、勾 Cursor",
             "workflow_dispatch", "push", "cursor",
-            {"stage": "push", "run_scan": "false", "run_push": "true",
-             "enable_ai": "true", "ai_provider": "cursor"},
+            {"stage": "push", "enable_ai": "true", "ai_provider": "cursor"},
         ),
         (
             "合併前 DailyStockPush 手動觸發、勾 Gemini",
             "workflow_dispatch", "push", "gemini",
-            {"stage": "push", "run_scan": "false", "run_push": "true",
-             "enable_ai": "true", "ai_provider": "gemini"},
+            {"stage": "push", "enable_ai": "true", "ai_provider": "gemini"},
         ),
         (
             "合併前 DailyStockPush 的 repository_dispatch (trigger-push)：只推播、固定用 Cursor",
             "repository_dispatch", "", "",
-            {"stage": "push", "run_scan": "false", "run_push": "true",
-             "enable_ai": "true", "ai_provider": "cursor"},
+            {"stage": "push", "enable_ai": "true", "ai_provider": "cursor"},
         ),
         (
             "排程觸發 (inputs 為空字串)：跑完整 pipeline、固定用 Cursor",
             "schedule", "", "",
-            {"stage": "full", "run_scan": "true", "run_push": "true",
-             "enable_ai": "true", "ai_provider": "cursor"},
+            {"stage": "full", "enable_ai": "true", "ai_provider": "cursor"},
         ),
         (
             "新增能力：只跑全市場掃描、不推播也不花 AI Token",
             "workflow_dispatch", "scan", "none",
-            {"stage": "scan", "run_scan": "true", "run_push": "false",
-             "enable_ai": "false", "ai_provider": ""},
+            {"stage": "scan", "enable_ai": "false", "ai_provider": ""},
         ),
         (
             "大小寫與前後空白容錯",
             "workflow_dispatch", " FULL ", " Gemini ",
-            {"stage": "full", "run_scan": "true", "run_push": "true",
-             "enable_ai": "true", "ai_provider": "gemini"},
+            {"stage": "full", "enable_ai": "true", "ai_provider": "gemini"},
         ),
     ]
 
@@ -174,13 +167,13 @@ def verify_plan_cli() -> None:
     code, outputs, stdout = run_plan("workflow_dispatch", "full", "cursor")
     check("完整流程：exit code 0", code == 0, f"exit={code}")
     check(
-        "完整流程：五個 output 都有寫入 $GITHUB_OUTPUT",
-        set(outputs) == {"stage", "run_scan", "run_push", "enable_ai", "ai_provider"},
+        "完整流程：三個 output 都有寫入 $GITHUB_OUTPUT",
+        set(outputs) == {"stage", "enable_ai", "ai_provider"},
         f"keys={sorted(outputs)}",
     )
     check(
         "完整流程：output 值正確",
-        outputs.get("run_scan") == "true" and outputs.get("run_push") == "true"
+        outputs.get("stage") == "full"
         and outputs.get("enable_ai") == "true" and outputs.get("ai_provider") == "cursor",
         f"outputs={outputs}",
     )
@@ -215,7 +208,8 @@ def _find_step(steps: list[dict], needle: str) -> dict | None:
 def verify_workflow() -> None:
     hr("3. 合併後的 workflow 結構 (.github/workflows/main.yml)")
 
-    check("原 DailyStockPush 的 daily_stock.yml 已併入而不再存在", not MERGED_AWAY.exists())
+    check("原 DailyStockPush 的 daily_stock.yml 已併入而不再存在", not WORKFLOW_MERGED_AWAY.exists())
+    check("原 DailyStockPush.py 已併入 DailyStockBot.py 而不再存在", not SCRIPT_MERGED_AWAY.exists())
 
     raw = WORKFLOW.read_text(encoding="utf-8")
     cfg = yaml.safe_load(raw)
@@ -284,46 +278,42 @@ def verify_workflow() -> None:
               "github.event.inputs.stage" in str(plan_env.get("RAW_STAGE")))
         check("RAW_AI_PROVIDER 讀 github.event.inputs.ai_provider",
               "github.event.inputs.ai_provider" in str(plan_env.get("RAW_AI_PROVIDER")))
-        check("執行計畫步驟排在掃描與推播之前",
-              steps.index(plan_step) < min(
-                  steps.index(_find_step(steps, "DailyStockBot.py")),
-                  steps.index(_find_step(steps, "DailyStockPush.py")),
-              ))
+        check("執行計畫步驟排在 pipeline 步驟之前",
+              steps.index(plan_step) < steps.index(_find_step(steps, "DailyStockBot.py")))
 
     install_step = _find_step(steps, "pip install")
     check("有安裝套件的步驟", install_step is not None)
     if install_step:
         install_cmd = str(install_step.get("run"))
-        # 兩支腳本的第三方 import（import 名 -> pip 套件名）
-        for pip_name in ("yfinance", "pandas", "numpy", "requests", "FinMind",
+        # 合併後 DailyStockBot.py 的第三方 import（import 名 -> pip 套件名）
+        for pip_name in ("yfinance", "pandas", "requests", "FinMind",
                          "gspread", "oauth2client", "google-genai"):
             check(f"套件安裝涵蓋 {pip_name}", pip_name in install_cmd)
+        for dropped in ("numpy", "tqdm"):
+            check(f"合併後未使用的 {dropped} 已從安裝清單移除", dropped not in install_cmd)
 
-    scan_step = _find_step(steps, "python DailyStockBot.py")
-    push_step = _find_step(steps, "python DailyStockPush.py")
-    check("保留執行 DailyStockBot.py 的步驟", scan_step is not None)
-    check("保留執行 DailyStockPush.py 的步驟", push_step is not None)
+    pipeline_step = _find_step(steps, "DailyStockBot.py")
+    check("合併成單一執行步驟", pipeline_step is not None)
+    check("不再有獨立執行 DailyStockPush.py 的步驟",
+          _find_step(steps, "DailyStockPush.py") is None)
 
-    if scan_step:
-        check("掃描步驟由 plan 的 run_scan 決定是否執行",
-              str(scan_step.get("if")) == "steps.plan.outputs.run_scan == 'true'", str(scan_step.get("if")))
-        scan_env = scan_step.get("env") or {}
-        for name in ("LINE_ACCESS_TOKEN", "LINE_USER_ID", "GOOGLE_SHEETS_JSON"):
-            check(f"掃描步驟有傳入 {name}", name in scan_env, f"env={sorted(scan_env)}")
-
-    if push_step:
-        check("推播步驟由 plan 的 run_push 決定是否執行",
-              str(push_step.get("if")) == "steps.plan.outputs.run_push == 'true'", str(push_step.get("if")))
-        push_env = push_step.get("env") or {}
-        for name in ("LINE_ACCESS_TOKEN", "GOOGLE_SHEETS_JSON", "GEMINI_API_KEY",
-                     "CURSOR_API_KEY", "MAIL_USERNAME", "MAIL_PASSWORD"):
-            check(f"推播步驟有傳入 {name}", name in push_env, f"env={sorted(push_env)}")
+    if pipeline_step:
+        check("pipeline 步驟以 --stage 傳入階段",
+              "--stage" in str(pipeline_step.get("run")), str(pipeline_step.get("run")).strip())
+        check("pipeline 步驟沒有 if 條件（階段改由腳本自行判斷）",
+              pipeline_step.get("if") is None, str(pipeline_step.get("if")))
+        step_env = pipeline_step.get("env") or {}
+        for name in ("LINE_ACCESS_TOKEN", "LINE_USER_ID", "GOOGLE_SHEETS_JSON",
+                     "GEMINI_API_KEY", "CURSOR_API_KEY", "MAIL_USERNAME", "MAIL_PASSWORD"):
+            check(f"pipeline 步驟有傳入 {name}", name in step_env, f"env={sorted(step_env)}")
+        check("STAGE 來自 plan 的 outputs",
+              "steps.plan.outputs.stage" in str(step_env.get("STAGE")), str(step_env.get("STAGE")))
         check("ENABLE_AI 來自 plan 的 outputs",
-              "steps.plan.outputs.enable_ai" in str(push_env.get("ENABLE_AI")), str(push_env.get("ENABLE_AI")))
+              "steps.plan.outputs.enable_ai" in str(step_env.get("ENABLE_AI")), str(step_env.get("ENABLE_AI")))
         check("AI_PROVIDER 來自 plan 的 outputs",
-              "steps.plan.outputs.ai_provider" in str(push_env.get("AI_PROVIDER")), str(push_env.get("AI_PROVIDER")))
-        check("推播步驟同時具備 Gemini 與 Cursor 金鑰，兩種提供者都能用",
-              "GEMINI_API_KEY" in push_env and "CURSOR_API_KEY" in push_env)
+              "steps.plan.outputs.ai_provider" in str(step_env.get("AI_PROVIDER")), str(step_env.get("AI_PROVIDER")))
+        check("同時具備 Gemini 與 Cursor 金鑰，兩種提供者都能用",
+              "GEMINI_API_KEY" in step_env and "CURSOR_API_KEY" in step_env)
 
     run_blocks = [str(s.get("run", "")) for s in steps]
     check(
@@ -341,15 +331,31 @@ def verify_workflow() -> None:
 # 4. 腳本端契約
 # ==========================================
 def verify_script_contracts() -> None:
-    hr("4. 腳本端契約 (DailyStockBot.py / DailyStockPush.py)")
+    hr("4. 腳本端契約 (DailyStockBot.py)")
 
-    scan_src = SCAN_SCRIPT.read_text(encoding="utf-8")
-    push_src = PUSH_SCRIPT.read_text(encoding="utf-8")
+    src = PIPELINE_SCRIPT.read_text(encoding="utf-8")
+    plan_src = PLAN_SCRIPT.read_text(encoding="utf-8")
 
-    # 取出 DailyStockPush.py 真正判斷 ENABLE_AI 的那行運算式單獨評估，
-    # 避免 import 整個模組（module 層會呼叫 FinMind 抓台股清單）。
-    match = re.search(r"enable_ai_env\s*=\s*(.+)", push_src)
-    check("DailyStockPush.py 仍以 ENABLE_AI 環境變數控制 AI 開關", match is not None)
+    # stage 詞彙必須兩邊一致，否則 workflow 傳進來的值腳本會不認
+    plan_stages = re.search(r"STAGES\s*=\s*\(([^)]*)\)", plan_src)
+    script_stages = re.findall(r'^\s*"(full|scan|push)":', src, re.M)
+    check("執行計畫腳本定義了 stage 允許值", plan_stages is not None)
+    if plan_stages:
+        check(
+            "workflow 端與腳本端的 stage 詞彙一致 (full/scan/push)",
+            set(re.findall(r'"(\w+)"', plan_stages.group(1))) == set(script_stages) == {"full", "scan", "push"},
+            f"plan={plan_stages.group(1).strip()} script={sorted(set(script_stages))}",
+        )
+
+    check("腳本以 --stage 參數切換階段", '"--stage"' in src)
+    check("未指定 --stage 時改讀 STAGE 環境變數", 'os.getenv("STAGE"' in src)
+    check("STAGE 為空字串時視為使用預設值 full", 'env_stage or "full"' in src)
+    check("STAGE 值非法時直接報錯而非默默跑錯階段", "parser.error(" in src)
+
+    # 取出真正判斷 ENABLE_AI 的那行運算式單獨評估，避免 import 整個模組
+    # （DailyStockBot.py 需要 yfinance / FinMind / gspread 等第三方套件）。
+    match = re.search(r"enable_ai_env\s*=\s*(.+)", src)
+    check("仍以 ENABLE_AI 環境變數控制 AI 開關", match is not None)
     if match:
         expr = match.group(1).strip()
 
@@ -367,26 +373,49 @@ def verify_script_contracts() -> None:
         check("ENABLE_AI 未設定時預設啟用 AI", enable_ai(None) is True)
 
     check(
-        "DailyStockPush.py 接受 AI_PROVIDER 為 cursor 或 gemini",
-        'os.getenv("AI_PROVIDER"' in push_src
-        and re.search(r'provider\s+in\s+\("gemini",\s*"cursor"\)', push_src) is not None,
+        "接受 AI_PROVIDER 為 cursor 或 gemini",
+        'os.getenv("AI_PROVIDER"' in src
+        and re.search(r'provider\s+in\s+\("gemini",\s*"cursor"\)', src) is not None,
+    )
+    check(
+        "AI 連線測試改由 run_push() 呼叫，掃描階段不會白跑",
+        re.search(r"def run_push\(\):(?:.|\n){0,200}check_ai_health\(\)", src) is not None
+        and re.search(r"^check_ai_health\(\)", src, re.M) is None,
     )
 
     check(
-        "DailyStockBot.py 負責寫入 WATCH_LIST（推播階段的資料來源）",
-        "update_watch_list_sheet" in scan_src
-        and 'client.open("WATCH_LIST")' in scan_src
-        and "append_rows" in scan_src,
+        "掃描階段負責寫入 WATCH_LIST（推播階段的資料來源）",
+        "def update_watch_list_sheet" in src and "def run_scan" in src,
     )
     check(
-        "DailyStockPush.py 負責讀取 WATCH_LIST，因此掃描必須先於推播",
-        "get_watch_list_from_sheet" in push_src
-        and 'client.open("WATCH_LIST")' in push_src
-        and "get_all_records" in push_src,
+        "推播階段負責讀取 WATCH_LIST，因此掃描必須先於推播",
+        "def get_watch_list_from_sheet" in src and "get_all_records" in src
+        and "def run_push" in src,
     )
     check(
-        "DailyStockBot.py 未使用 numpy 以外的額外相依（僅 import，可安全保留安裝）",
-        "import numpy" in scan_src,
+        "main() 依 stage 決定先掃描後推播的順序",
+        re.search(r"if do_scan:\s*\n\s*run_scan\(\)\s*\n\s*if do_push:\s*\n\s*run_push\(\)", src) is not None,
+    )
+    check(
+        "兩張不同的報表各有獨立函式，不再共用同名的 sync_to_sheets",
+        "def sync_institutional_sheet" in src and "def sync_diagnostic_sheet" in src
+        and "def sync_to_sheets" not in src,
+    )
+    check(
+        "台股清單改為延遲載入並快取，兩階段共用只抓一次",
+        "def get_taiwan_stock_info_df" in src
+        and re.search(r"^STOCK_INFO_MAP\s*=\s*get_global_stock_info\(\)", src, re.M) is None,
+    )
+    check(
+        "共用工具在合併後只剩一份",
+        src.count("def get_gspread_client") == 1
+        and src.count("def get_tw_stock") == 1
+        and src.count("def get_inst_stats") == 1
+        and src.count("def get_line_quota_report") == 1,
+    )
+    check(
+        "合併後未使用的 numpy / tqdm import 已移除",
+        "import numpy" not in src and "tqdm" not in src,
     )
 
 

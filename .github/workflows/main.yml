@@ -1,10 +1,11 @@
 name: DailyStockBot
 
-# 🔀 本檔案整併了原本的 DailyStockBot (main.yml) 與 DailyStockPush (daily_stock.yml)。
-#    DailyStockBot.py  全市場掃描 → 寫入 Google Sheets 的 WATCH_LIST
-#    DailyStockPush.py 讀回 WATCH_LIST → AI 戰略報告 → 寫報表 + 寄信 + LINE 推播
-#    兩者靠 WATCH_LIST 串接，必須「先掃描後推播」，所以改成同一個 job 依序執行；
-#    原本兩條 workflow 各自排程（16:10 / 16:20）只差 10 分鐘，掃描還沒跑完推播就會讀到半套資料。
+# 🔀 本檔案整併了原本的 DailyStockBot (main.yml) 與 DailyStockPush (daily_stock.yml)，
+#    對應的 DailyStockPush.py 也已併入 DailyStockBot.py，改用 --stage 切換階段：
+#      scan：全市場掃描 → 寫入 Google Sheets 的 WATCH_LIST
+#      push：讀回 WATCH_LIST → AI 戰略報告 → 寫報表 + 寄信 + LINE 推播
+#    兩階段靠 WATCH_LIST 串接，必須「先掃描後推播」；原本兩條 workflow 各自排程
+#    （16:10 / 16:20）只差 10 分鐘，掃描還沒跑完推播就會讀到半套資料。
 
 on:
   # ⚡ 排程與 repository_dispatch 觸發時 inputs 是空字串，一律套用預設值（見「解析執行計畫」步驟）
@@ -63,24 +64,15 @@ jobs:
       - name: 4. 安裝必要套件
         run: |
           python -m pip install --upgrade pip
-          pip install -U yfinance pandas numpy requests FinMind tqdm gspread oauth2client google-genai
+          pip install -U yfinance pandas requests FinMind gspread oauth2client google-genai
 
       # [已移除] 建立 Google 金鑰檔案 (不需要了，且比較安全)
       # GOOGLE_SHEETS_JSON 整包 JSON 直接以環境變數傳給腳本，不落地成 .json 檔
 
-      - name: 5. 執行全市場掃描 (DailyStockBot)
-        if: steps.plan.outputs.run_scan == 'true'
+      - name: 5. 執行每日台股 pipeline
         env:
           PYTHONUNBUFFERED: "1"
-          LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-          GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
-        run: python DailyStockBot.py
-
-      - name: 6. 執行 AI 戰略體檢與推播 (DailyStockPush)
-        if: steps.plan.outputs.run_push == 'true'
-        env:
-          PYTHONUNBUFFERED: "1"
+          STAGE: ${{ steps.plan.outputs.stage }}
           ENABLE_AI: ${{ steps.plan.outputs.enable_ai }}
           AI_PROVIDER: ${{ steps.plan.outputs.ai_provider }}
           LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
@@ -90,4 +82,4 @@ jobs:
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
-        run: python DailyStockPush.py
+        run: python DailyStockBot.py --stage "$STAGE"

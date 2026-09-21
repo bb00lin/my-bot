@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
-"""解析 DailyStockBot workflow 的執行計畫（要跑哪些階段、用哪家 AI）。
+"""解析 DailyStockBot workflow 的執行計畫（要跑哪個階段、用哪家 AI）。
 
 由 .github/workflows/main.yml 的「解析執行計畫」步驟呼叫，只用標準庫，
 邏輯才能在本機離線驗證（見 test_daily_stock_workflow_verify.py）。
+stage 只在這裡正規化，實際「掃描 / 推播」的對應由 DailyStockBot.py 的 STAGES 決定。
 
 輸入（環境變數）：
     EVENT_NAME       github.event_name
@@ -11,7 +12,7 @@
     RAW_AI_PROVIDER  github.event.inputs.ai_provider（同上）
 
 輸出（附加寫入 $GITHUB_OUTPUT）：
-    stage / run_scan / run_push / enable_ai / ai_provider
+    stage / enable_ai / ai_provider
 """
 
 from __future__ import annotations
@@ -20,12 +21,7 @@ import os
 import sys
 
 
-# stage -> (是否執行全市場掃描, 是否執行 AI 戰略推播)
-STAGES = {
-    "full": (True, True),
-    "scan": (True, False),
-    "push": (False, True),
-}
+STAGES = ("full", "scan", "push")
 
 AI_PROVIDERS = ("none", "cursor", "gemini")
 
@@ -54,13 +50,10 @@ def resolve_plan(event_name: str, raw_stage: str, raw_ai_provider: str) -> dict[
     if provider not in AI_PROVIDERS:
         raise ValueError(f"未知的 ai_provider：{provider}（可用：{', '.join(AI_PROVIDERS)}）")
 
-    run_scan, run_push = STAGES[stage]
     enable_ai = provider != "none"
 
     return {
         "stage": stage,
-        "run_scan": "true" if run_scan else "false",
-        "run_push": "true" if run_push else "false",
         "enable_ai": "true" if enable_ai else "false",
         "ai_provider": provider if enable_ai else "",
     }
@@ -85,8 +78,6 @@ def main() -> int:
 
     print(
         f"📋 執行計畫：stage={plan['stage']}"
-        f" / 全市場掃描={plan['run_scan']}"
-        f" / AI 戰略推播={plan['run_push']}"
         f" / ENABLE_AI={plan['enable_ai']}"
         f" / AI_PROVIDER={plan['ai_provider'] or '(未啟用)'}"
     )

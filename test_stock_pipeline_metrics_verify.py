@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""離線驗證 DailyStockPush.py 的歷史資料長度防護（不需憑證、不連外網）。
+"""離線驗證合併後 DailyStockBot.py 的階段切換與歷史資料長度防護（不需憑證、不連外網）。
 
 重現的問題：WATCH_LIST 裡四檔手動填的庫存 ETF，只有 00997A 出現在
 「全能金流診斷報表」，另外三檔靜默消失。原因是 fetch_pro_metrics 的
@@ -13,8 +13,8 @@
     009824 群益美國科技巨頭  70 日
     00997A 主動群益美國增長 122 日
 
-DailyStockPush 在 module 層就會呼叫 FinMind 抓台股清單，所以先把需要網路的
-第三方套件換成假模組，再用假環境變數 import。
+同時驗證 DailyStockPush.py 併入後的 --stage 路由：scan / push / full 各自
+只跑該跑的階段。需要網路的第三方套件一律換成假模組，再用假環境變數 import。
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import io
 import os
 import sys
 import types
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 import pandas as pd
 
@@ -100,12 +100,12 @@ def install_offline_modules() -> None:
 
 
 install_offline_modules()
-os.environ["ENABLE_AI"] = "false"  # 避免 import 時去測 AI 連線
+os.environ["ENABLE_AI"] = "false"  # run_push() 的 AI 連線測試一律關閉
 os.environ.pop("GEMINI_API_KEY", None)
 os.environ.pop("CURSOR_API_KEY", None)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import DailyStockPush as m  # noqa: E402
+import DailyStockBot as m  # noqa: E402
 
 
 # ==========================================
@@ -302,11 +302,76 @@ def verify_none_safe_consumers() -> None:
     check("戰略總結用「資料不足」表示缺值", m.NO_DATA_TEXT in summary)
 
 
+def verify_stage_routing() -> None:
+    hr("5. --stage 階段路由（DailyStockPush.py 併入後）")
+
+    calls = []
+    original_scan, original_push = m.run_scan, m.run_push
+    m.run_scan = lambda: calls.append("scan")
+    m.run_push = lambda: calls.append("push")
+
+    def run_main(argv, stage_env=None):
+        """跑一次 main()，回傳 (實際執行的階段, log)。"""
+        calls.clear()
+        if stage_env is None:
+            os.environ.pop("STAGE", None)
+        else:
+            os.environ["STAGE"] = stage_env
+        buffer = io.StringIO()
+        with redirect_stdout(buffer), redirect_stderr(buffer):
+            m.main(argv)
+        return list(calls), buffer.getvalue()
+
+    try:
+        for argv, expected in (
+            (["--stage", "full"], ["scan", "push"]),
+            (["--stage", "scan"], ["scan"]),
+            (["--stage", "push"], ["push"]),
+            ([], ["scan", "push"]),
+        ):
+            label = " ".join(argv) or "(未指定 --stage)"
+            got, log = run_main(argv)
+            check(f"`{label}` 執行 {expected}", got == expected, f"實際={got}")
+            check(f"`{label}` 會把階段印在 log 上", "執行階段" in log, log.strip())
+
+        check("完整流程一定是先掃描後推播", run_main(["--stage", "full"])[0] == ["scan", "push"])
+
+        # 排程觸發時 workflow 傳進來的是空字串，必須視為「使用預設值」而不是錯誤
+        got, _ = run_main([], stage_env="")
+        check("STAGE 為空字串時跑完整 pipeline", got == ["scan", "push"], f"實際={got}")
+
+        got, _ = run_main([], stage_env="push")
+        check("STAGE=push 只跑推播階段", got == ["push"], f"實際={got}")
+
+        got, _ = run_main([], stage_env=" PUSH ")
+        check("STAGE 的大小寫與前後空白容錯", got == ["push"], f"實際={got}")
+
+        got, _ = run_main(["--stage", "scan"], stage_env="push")
+        check("--stage 參數優先於 STAGE 環境變數", got == ["scan"], f"實際={got}")
+
+        for bad_source, argv, stage_env in (
+            ("STAGE 環境變數", [], "deploy"),
+            ("--stage 參數", ["--stage", "deploy"], None),
+        ):
+            try:
+                run_main(argv, stage_env=stage_env)
+                ok = False
+                detail = "沒有拋出 SystemExit"
+            except SystemExit as exc:
+                ok = exc.code not in (0, None)
+                detail = f"exit={exc.code}"
+            check(f"{bad_source} 值非法時以非 0 exit code 結束", ok, detail)
+    finally:
+        m.run_scan, m.run_push = original_scan, original_push
+        os.environ.pop("STAGE", None)
+
+
 def main() -> int:
     verify_watch_list_etfs()
     verify_thresholds()
     verify_skip_logging()
     verify_none_safe_consumers()
+    verify_stage_routing()
 
     hr("驗證結果")
     print(f"PASS: {PASS}    FAIL: {FAIL}")
