@@ -2282,7 +2282,7 @@ def run_clear_logic():
             if not mention_container: mention_container = target_mention
 
             if member_name_of_block(mention_container):
-                # 本腳本產生的純文字名稱行維持 h3 標準格式，不要被改成 h1
+                # 本腳本產生的純文字名稱行維持 MEMBER_HEADING_TAG 標準格式（含 strong 與背景色）
                 normalized = normalize_member_name_block(soup, mention_container)
                 if normalized is not mention_container:
                     mention_container = normalized
