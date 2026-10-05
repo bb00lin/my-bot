@@ -187,7 +187,7 @@ s.append(m.generate_style_3_html(s, datetime(2026, 10, 2), [datetime(2026, 9, 30
 m.PENDING_CONF_IMAGES.clear()
 m.promote_images_to_block_media(s, SRC_PAGE)
 sto = str(s)
-cr = requests.post(f"{BASE}/wiki/rest/api/contentbody/convert/atlas_doc_format",
+cr = requests.post(f"{BASE}/wiki/rest/api/contentbody/convert/atlas_doc_format?contentIdContext={SRC_PAGE}",
                    json={"value": sto, "representation": "storage"}, auth=AUTH, timeout=60)
 print(f"  convert -> {cr.status_code}")
 if cr.status_code == 200:
