@@ -139,34 +139,88 @@ for page_id in PAGE_IDS:
         except Exception as e:
             print(f"    ADF parse error: {e}")
 
-# 4. 候選標記轉換測試（不寫頁面）
-hr("候選標記 storage→ADF")
-acc = ""
-try:
-    ur = requests.get(f"{BASE}/rest/api/3/myself", auth=AUTH, timeout=20)
-    acc = ur.json().get("accountId", "") if ur.status_code == 200 else ""
-except Exception:
-    pass
-BG = "#F5E6FF"
-CANDIDATES = {
-    "A_current_p_span": f'<p style="margin-top:20px; margin-bottom:10px;"><span style="background-color:{BG}; font-weight:bold; font-size:120%; padding:3px 8px; border-radius:4px; border:1px solid #7f8c8d;">@Bob Lin</span></p>',
-    "B_h3_strong_span": f'<h3><strong><span style="background-color:{BG};">@Bob Lin</span></strong></h3>',
-    "C_h2_strong_span": f'<h2><strong><span style="background-color:{BG};">@Bob Lin</span></strong></h2>',
-    "D_h3_mention": f'<h3><ac:link><ri:user ri:account-id="{acc}" /></ac:link></h3>',
-    "E_p_strong_mention": f'<p><strong><ac:link><ri:user ri:account-id="{acc}" /></ac:link></strong></p>',
-    "F_h3_strong_mention": f'<h3><strong><ac:link><ri:user ri:account-id="{acc}" /></ac:link></strong></h3>',
-}
-for label, sto in CANDIDATES.items():
-    for to in ("atlas_doc_format", "view"):
-        try:
-            cr = requests.post(
-                f"{BASE}/wiki/rest/api/contentbody/convert/{to}",
-                json={"value": sto, "representation": "storage"},
-                auth=AUTH, timeout=60,
-            )
-            val = cr.json().get("value", "") if cr.status_code == 200 else cr.text[:200]
-            print(f"\n  [{label} -> {to}] {cr.status_code}: {safe(str(val)[:600])}")
-        except Exception as e:
-            print(f"\n  [{label} -> {to}] error {e}")
+    # 部署後：名稱 heading 與「worklog內容如圖」日列
+    n_h3 = sum(1 for h in soup.find_all("h3")
+               if any(h.get_text().strip() == f"@{n}" for n in NAMES) and h.find("strong"))
+    n_toc = len(re.findall(r'ac:name="toc"', storage))
+    print(f"    member h3+strong={n_h3} toc macro={n_toc}")
+    for p in soup.find_all("p"):
+        if "worklog內容如圖" not in p.get_text():
+            continue
+        row = p.find_parent("div")
+        if row is None:
+            continue
+        seq = []
+        for sub in row.find_all(recursive=False):
+            img = sub.find("ac:image")
+            if img is not None:
+                ri = img.find("ri:attachment")
+                seq.append(f"IMG({ri.get('ri:filename') if ri else '?'}, align={img.get('ac:align')})")
+            else:
+                seq.append("text(" + re.sub(r"-{2,}", "", sub.get_text(" ", strip=True))[:70] + ")")
+        print(f"    [如圖列] {safe(' → '.join(seq))}")
 
-print("\nDONE")
+# 4. 用新程式碼渲染 9/30 PBA-225 情境，轉 ADF 確認（不寫頁面）
+hr("新程式碼渲染 → ADF（不寫頁面）")
+from datetime import datetime  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import daily_worklog_to_confluence as m  # noqa: E402
+
+SRC_PAGE = "225247361"
+JIRA_FN = "wl_20260930_170000_441_471659_clipboard.png"
+
+
+def day(comment, day_images, mins=60):
+    return {"date": datetime(2026, 9, 30), "day_name": "Wed", "day_short": "9/30",
+            "dur_str": m.format_duration(mins), "total_mins_day": mins, "comment": comment,
+            "transition": "", "has_log": True, "day_images": day_images, "day_comments": []}
+
+
+s = BeautifulSoup("", "html.parser")
+s.append(m.build_member_name_heading(s, "Bob Lin", m.USER_BG_COLORS["Bob Lin"]))
+log = {"key": "PBA-225", "summary": "probe", "status": "IN PROGRESS", "project": "PBA",
+       "parent": "NA", "label": "NA", "duedate": '"Due TBD"',
+       "daily_days": [day(f"[[IMG:{JIRA_FN}]]", []), day("", [JIRA_FN])]}
+s.append(m.generate_style_3_html(s, datetime(2026, 10, 2), [datetime(2026, 9, 30)], [log],
+                                 bg_color=m.USER_BG_COLORS["Bob Lin"]))
+m.PENDING_CONF_IMAGES.clear()
+m.promote_images_to_block_media(s, SRC_PAGE)
+sto = str(s)
+cr = requests.post(f"{BASE}/wiki/rest/api/contentbody/convert/atlas_doc_format",
+                   json={"value": sto, "representation": "storage"}, auth=AUTH, timeout=60)
+print(f"  convert -> {cr.status_code}")
+if cr.status_code == 200:
+    adf_s = cr.json().get("value", "")
+    c = Counter(re.findall(r'"type"\s*:\s*"([A-Za-z0-9_]+)"', adf_s))
+    n_ac = sto.count("<ac:image")
+    print(f"  <ac:image>={n_ac} mediaSingle={c.get('mediaSingle', 0)} "
+          f"inline-media-image={adf_s.count('inline-media-image')} "
+          f"unsupportedInline={c.get('unsupportedInline', 0)} unsupportedBlock={c.get('unsupportedBlock', 0)} "
+          f"heading={c.get('heading', 0)} align-start={adf_s.count('align-start')}")
+    doc = json.loads(adf_s)
+    seq = []
+
+    def collect(node, depth):
+        t = node.get("type")
+        if t == "heading":
+            seq.append(f"heading{(node.get('attrs') or {}).get('level')}"
+                       f"[{adf_text(node)} marks={[mk['type'] for c2 in node.get('content') or [] for mk in c2.get('marks') or []]}]")
+        elif t == "paragraph":
+            txt = re.sub(r"-{2,}", "", adf_text(node)).strip()
+            if txt:
+                seq.append(f"p[{txt[:50]}]")
+        elif t == "mediaSingle":
+            seq.append(f"mediaSingle({(node.get('attrs') or {}).get('layout')})")
+
+    walk(doc, collect)
+    print("  順序: " + safe(" → ".join(seq)))
+    if n_ac != c.get("mediaSingle", 0) or adf_s.count("inline-media-image") or c.get("unsupportedInline") or c.get("unsupportedBlock"):
+        problems.append("新程式碼渲染的 ADF 不符預期")
+else:
+    print(safe(cr.text[:300]))
+
+hr("結論")
+for p in problems:
+    print(" - " + p)
+print("DONE")
