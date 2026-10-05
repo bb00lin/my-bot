@@ -5,7 +5,7 @@
 2. 備註裡「文字 / [[IMG:]] 交錯」的原始順序有被保留。
 3. 當日留言連結（💬 留言）只輸出連結、且帶 focusedCommentId。
 4. 只有圖片（或沒有備註但有當日圖片）的日列，└ 📝 後顯示「worklog內容如圖」再接圖片。
-5. 成員名稱行為 <h3><strong><span>，正規化可重複執行不巢狀。
+5. 成員名稱行為 <h1><strong><span>，正規化可重複執行不巢狀。
 
 不連線 Confluence；用假環境變數載入模組，並 monkeypatch 需要網路的函式。
 """
@@ -511,14 +511,14 @@ check(("text", f"└ 📝 (1h) {CAP}") in seq7b, f"[案例7b] style2 NA + 當日
 
 
 # ============================================================
-hr("案例 8：成員名稱行 → <h3><strong><span>，可重複執行不巢狀")
+hr("案例 8：成員名稱行 → <h1><strong><span>，可重複執行不巢狀")
 # ============================================================
 legacy = (
     '<p local-id="aa">#Worklog</p>'
     '<p style="margin-top: 20.0px;"><span style="background-color: rgb(255,248,230);font-weight: bold;'
     'font-size: 120.0%;">@sam.chang</span></p>'
     '<div class="daily-worklog-20261002"><p>body</p></div>'
-    '<h1><span style="background-color: rgb(245,230,255);">@Bob Lin</span></h1>'
+    '<h3><span style="background-color: rgb(245,230,255);">@Bob Lin</span></h3>'
     '<p>@Bob Lin 不是名稱行</p>'
     '<p><ac:link><ri:user ri:account-id="x" /></ac:link></p>'
     '<p local-id="bb">#Worklog End<br /></p>'
@@ -533,13 +533,13 @@ n2 = m.normalize_member_names_in_region(s8, start8, end8)
 print(first)
 check(n1 == 2, f"[案例8] 第一次應改寫 2 行，實得 {n1}")
 check(n2 == 0 and str(s8) == first, "[案例8] 第二次執行不應再改動（非冪等）")
-h3s = s8.find_all("h3")
-check([h.get_text() for h in h3s] == ["@sam.chang", "@Bob Lin"], f"[案例8] h3 內容不符 {[h.get_text() for h in h3s]}")
-for h in h3s:
-    check(len(h.find_all("strong")) == 1 and not h.find("h3"), f"[案例8] {h.get_text()} 有巢狀 strong/heading")
+h1s = s8.find_all("h1")
+check([h.get_text() for h in h1s] == ["@sam.chang", "@Bob Lin"], f"[案例8] h1 內容不符 {[h.get_text() for h in h1s]}")
+for h in h1s:
+    check(len(h.find_all("strong")) == 1 and not h.find("h1"), f"[案例8] {h.get_text()} 有巢狀 strong/heading")
     check("font-size" not in str(h) and "font-weight" not in str(h), f"[案例8] {h.get_text()} 殘留 ADF 不支援的樣式")
-check("rgb(255,248,230)" in str(h3s[0]), "[案例8] 未沿用原本的背景色")
-check(s8.find("h1") is None, "[案例8] h1 名稱行沒有被標準化")
+check("rgb(255,248,230)" in str(h1s[0]), "[案例8] 未沿用原本的背景色")
+check(s8.find("h3") is None, "[案例8] 非 h1 的名稱行沒有被標準化")
 check("<p>@Bob Lin 不是名稱行</p>" in first, "[案例8] 誤改了一般段落")
 check("<p><span>@Vic Wu</span></p>" in first, "[案例8] 改到了 #Worklog End 之後的內容")
 check(s8.find("ri:user") is not None and s8.find("ri:user").find_parent("p") is not None,
@@ -552,7 +552,7 @@ check(m.normalize_member_name_block(s8, built) is built, "[案例8] 標準格式
 # run_clear_logic 用 '@name' 文字找錨點：新格式仍可被找到，且它的下一個兄弟就是日誌區塊
 anchor = s8.find(string=re.compile("@sam.chang", re.I))
 container = anchor.find_parent(["p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "div"])
-check(container is not None and container.name == "h3", "[案例8] '@name' 錨點找不到 h3 容器")
+check(container is not None and container.name == "h1", "[案例8] '@name' 錨點找不到 h1 容器")
 check(m.member_name_of_block(container) == "sam.chang", "[案例8] 錨點容器無法辨識為成員名稱行")
 
 # confluence_api2 的同名正規化（新週報建立時）結果需一致
@@ -573,4 +573,4 @@ if failures:
         print("   - " + f)
     sys.exit(1)
 print("✅ 圖片皆為 block 層獨立 <p>、靠左、無 <a> 包裹；文字/圖片交錯順序保留；留言連結正確；"
-      "純圖片備註顯示「worklog內容如圖」；成員名稱行為冪等的 <h3><strong>")
+      "純圖片備註顯示「worklog內容如圖」；成員名稱行為冪等的 <h1><strong>")

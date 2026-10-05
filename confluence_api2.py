@@ -61,12 +61,12 @@ def calculate_next_filename(latest_title):
 # 與 daily_worklog_to_confluence.py 的成員名稱行格式一致：Cloud 的 ADF 會丟掉
 # font-size／font-weight 樣式，只保留 heading、strong 與 backgroundColor。
 MEMBER_NAMES = ["sam.chang", "Vic Wu", "SF Hsieh", "shannonchang", "Bob Lin"]
-MEMBER_HEADING_TAG = "h3"
+MEMBER_HEADING_TAG = "h1"
 _BG_COLOR_RE = re.compile(r"background-color\s*:\s*([^;]+)", re.I)
 
 
 def normalize_member_name_lines(soup):
-    """#Worklog ～ #Worklog End 之間「@成員」純文字行改成 <h3><strong><span>，已是該格式則略過。"""
+    """#Worklog ～ #Worklog End 之間「@成員」純文字行改成 <h1><strong><span>，已是該格式則略過。"""
     start = soup.find(string=re.compile(r'#Worklog\s*$'))
     end = soup.find(string=re.compile(r'#Worklog End\s*$'))
     if not start:

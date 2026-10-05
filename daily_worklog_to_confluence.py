@@ -53,8 +53,8 @@ USER_BG_COLORS = {
 }
 
 # 成員名稱行：Cloud 的 storage→ADF 會丟掉 span 的 font-size／font-weight，
-# 只保留 heading、strong mark 與 backgroundColor mark，所以用 <h3><strong> 放大加粗。
-MEMBER_HEADING_TAG = "h3"
+# 只保留 heading、strong mark 與 backgroundColor mark，所以用 <h1><strong> 放大加粗。
+MEMBER_HEADING_TAG = "h1"
 _BG_COLOR_RE = re.compile(r"background-color\s*:\s*([^;]+)", re.I)
 
 
