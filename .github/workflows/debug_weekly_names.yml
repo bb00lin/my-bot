@@ -1,0 +1,41 @@
+name: DEBUG WeeklyReport names probe (temporary)
+
+# 一次性探測用（手動觸發）：唯讀，不修改任何 Confluence 內容、不輸出任何金鑰。
+# 驗證完成後請刪除本 workflow 與 scripts/probe_weekly_names.py。
+
+on:
+  workflow_dispatch:
+    inputs:
+      page_ids:
+        description: 'Comma separated WeeklyReport page ids'
+        required: false
+        default: '228327425,225247361'
+      issue_key:
+        description: 'Issue key to dump rows for'
+        required: false
+        default: 'PBA-225'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Run probe
+        env:
+          CONF_URL: ${{ secrets.CONF_URL }}
+          CONF_USER: ${{ secrets.CONF_USER }}
+          CONF_PASS: ${{ secrets.CONF_PASS }}
+          PROBE_PAGE_IDS: ${{ github.event.inputs.page_ids }}
+          PROBE_ISSUE_KEY: ${{ github.event.inputs.issue_key }}
+          PYTHONIOENCODING: 'utf-8'
+        run: python scripts/probe_weekly_names.py
