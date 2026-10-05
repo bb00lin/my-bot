@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta
 from requests.auth import HTTPBasicAuth
 from urllib.parse import urlparse
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 # --- 設定區 ---
 RAW_URL = os.environ.get("CONF_URL")
@@ -58,6 +58,53 @@ def calculate_next_filename(latest_title):
     friday = today + timedelta(days=(4 - today.weekday()))
     return friday.strftime("%Y%m%d")
 
+# 與 daily_worklog_to_confluence.py 的成員名稱行格式一致：Cloud 的 ADF 會丟掉
+# font-size／font-weight 樣式，只保留 heading、strong 與 backgroundColor。
+MEMBER_NAMES = ["sam.chang", "Vic Wu", "SF Hsieh", "shannonchang", "Bob Lin"]
+MEMBER_HEADING_TAG = "h3"
+_BG_COLOR_RE = re.compile(r"background-color\s*:\s*([^;]+)", re.I)
+
+
+def normalize_member_name_lines(soup):
+    """#Worklog ～ #Worklog End 之間「@成員」純文字行改成 <h3><strong><span>，已是該格式則略過。"""
+    start = soup.find(string=re.compile(r'#Worklog\s*$'))
+    end = soup.find(string=re.compile(r'#Worklog End\s*$'))
+    if not start:
+        return 0
+    start_el = start.parent
+    end_el = end.parent if end else None
+    changed = 0
+    node = start_el.next_sibling
+    while node is not None and node is not end_el:
+        nxt = node.next_sibling
+        if isinstance(node, Tag) and node.name in ("p", "h1", "h2", "h3", "h4", "h5", "h6") and not node.find("ac:link"):
+            text = (node.get_text() or "").replace("\u00a0", " ").strip()
+            name = next((n for n in MEMBER_NAMES if text == f"@{n}"), None)
+            strongs = node.find_all("strong")
+            canonical = (node.name == MEMBER_HEADING_TAG and len(strongs) == 1
+                         and strongs[0].parent is node and strongs[0].find("span") is not None)
+            if name and not canonical:
+                bg = "#ffffff"
+                for tag in node.find_all(style=True):
+                    m = _BG_COLOR_RE.search(tag.get("style") or "")
+                    if m:
+                        bg = m.group(1).strip()
+                        break
+                heading = soup.new_tag(MEMBER_HEADING_TAG, style="margin-top:20px; margin-bottom:10px;")
+                strong = soup.new_tag("strong")
+                span = soup.new_tag(
+                    "span",
+                    style=f"background-color:{bg}; padding:3px 8px; border-radius:4px; border:1px solid #7f8c8d;",
+                )
+                span.string = f"@{name}"
+                strong.append(span)
+                heading.append(strong)
+                node.replace_with(heading)
+                changed += 1
+        node = nxt
+    return changed
+
+
 def create_new_report(latest_page):
     next_filename = calculate_next_filename(latest_page['title'])
     new_title = f"WeeklyReport_{next_filename}"
@@ -78,6 +125,10 @@ def create_new_report(latest_page):
         classes = div.get('class', [])
         if any(cls.startswith('daily-worklog-') for cls in classes):
             div.extract()
+
+    renamed = normalize_member_name_lines(soup)
+    if renamed:
+        print(f"🔤 已將 {renamed} 個成員名稱行改為放大加粗標題")
             
     new_body = str(soup)
 

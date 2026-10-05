@@ -4,6 +4,8 @@
 1. 圖片是 block 層獨立 <p>（Cloud 才會轉成可點擊放大的 mediaSingle），且靠左對齊。
 2. 備註裡「文字 / [[IMG:]] 交錯」的原始順序有被保留。
 3. 當日留言連結（💬 留言）只輸出連結、且帶 focusedCommentId。
+4. 只有圖片（或沒有備註但有當日圖片）的日列，└ 📝 後顯示「worklog內容如圖」再接圖片。
+5. 成員名稱行為 <h3><strong><span>，正規化可重複執行不巢狀。
 
 不連線 Confluence；用假環境變數載入模組，並 monkeypatch 需要網路的函式。
 """
@@ -356,10 +358,219 @@ check(seq4[moxa_idx + 1] == ("img", d0f429),
       f"[案例4] 第 2 個標記未緊接 'moxa iothinx 4510'，實得 {seq4[moxa_idx + 1]}")
 
 
+# ============================================================
+hr("案例 5：只有圖片的備註 → 「worklog內容如圖」在圖片前（style 3 真實渲染）")
+# ============================================================
+from datetime import datetime  # noqa: E402
+
+CAP = m.IMAGE_ONLY_COMMENT_TEXT
+for fn in ("a.png", "b.png", "c.png", "d.png", "e.png", "f.png"):
+    m._CONF_IMAGE_META[m.conf_unique_img_name("PBA-225", fn)] = {
+        "width": 1316, "height": 730, "version": 6, "alt": fn,
+    }
+
+
+def day(comment="", mins=60, transition="", day_images=None, day_comments=None, d=30):
+    return {
+        "date": datetime(2026, 9, d), "day_name": "Wed", "day_short": f"9/{d}",
+        "dur_str": m.format_duration(mins) if mins else "", "total_mins_day": mins,
+        "comment": comment, "transition": transition, "has_log": True,
+        "day_images": day_images or [], "day_comments": day_comments or [],
+    }
+
+
+def render_style3(days):
+    s = BeautifulSoup("", "html.parser")
+    log = {
+        "key": "PBA-225", "summary": "Demo", "status": "IN PROGRESS", "project": "PBA",
+        "parent": "NA", "label": "NA", "duedate": '"Due TBD"', "daily_days": days,
+    }
+    container = m.generate_style_3_html(
+        s, datetime(2026, 10, 2), [datetime(2026, 9, 30)], [log], bg_color="#F5E6FF",
+    )
+    s.append(container)
+    m.promote_images_to_block_media(s, "225247361")
+    return s
+
+
+def row_sequences(s):
+    body = s.find("ac:rich-text-body")
+    return [block_summary(div) for div in body.find_all("div", recursive=False)]
+
+
+def comment_seq(rows, idx=0):
+    """去掉日期列（第一個 block），只看 └ 📝 之後的區塊。"""
+    return rows[idx][1:]
+
+
+# 5a：單一標記
+s5 = render_style3([day("[[IMG:a.png]]")])
+audit_images(s5, "案例5a")
+seq5 = comment_seq(row_sequences(s5))
+print(f"  5a = {seq5}")
+check(seq5 == [("text", f"└ 📝 {CAP}"), ("img", "wl_PBA-225_a.png")],
+      f"[案例5a] 應為 文字「{CAP}」→ 圖片，實得 {seq5}")
+
+# 5b：多筆 worklog 合併（' / \n' 分隔）且都只有圖片
+s5b = render_style3([day("[[IMG:a.png]] / \n[[IMG:b.png]]")])
+audit_images(s5b, "案例5b")
+seq5b = comment_seq(row_sequences(s5b))
+print(f"  5b = {seq5b}")
+check(seq5b == [("text", f"└ 📝 {CAP}"), ("img", "wl_PBA-225_a.png"), ("img", "wl_PBA-225_b.png")],
+      f"[案例5b] 多筆合併的純圖片備註不符，實得 {seq5b}")
+check("/" not in "".join(v for k, v in seq5b if k == "text").replace("└ 📝", ""),
+      "[案例5b] 殘留 ' / ' 分隔符")
+
+# 5c：有文字就不加
+s5c = render_style3([day("真的有文字\n[[IMG:a.png]]")])
+seq5c = comment_seq(row_sequences(s5c))
+print(f"  5c = {seq5c}")
+check(CAP not in str(s5c), "[案例5c] 有文字的備註不應出現「worklog內容如圖」")
+check(seq5c[0] == ("text", "└ 📝 真的有文字"), f"[案例5c] 文字順序錯誤 {seq5c}")
+
+
+# ============================================================
+hr("案例 6：沒有備註 + 當日附件圖片 → 「worklog內容如圖」；其他 fallback 不變")
+# ============================================================
+s6 = render_style3([day("", mins=60, day_images=["c.png"])])
+audit_images(s6, "案例6a")
+seq6 = comment_seq(row_sequences(s6))
+print(f"  6a (有工時 + 當日圖片) = {seq6}")
+check(seq6 == [("text", f"└ 📝 {CAP}"), ("img", "wl_PBA-225_c.png")],
+      f"[案例6a] 應為 「{CAP}」→ 圖片（取代 (無填寫工作日誌)），實得 {seq6}")
+check("(無填寫工作日誌)" not in str(s6), "[案例6a] 仍出現 (無填寫工作日誌)")
+
+s6b = render_style3([day("", mins=0, day_images=["d.png"])])
+seq6b = comment_seq(row_sequences(s6b))
+print(f"  6b (零工時 + 當日圖片) = {seq6b}")
+check(seq6b == [("text", f"└ 📝 {CAP}"), ("img", "wl_PBA-225_d.png")],
+      f"[案例6b] 應取代 (附件圖片)，實得 {seq6b}")
+check("(附件圖片)" not in str(s6b), "[案例6b] 仍出現 (附件圖片)")
+
+# 6c：留言連結 + 非圖片附件 + 圖片，順序：文字 → 💬 → 圖片 → 📎
+file_meta = {"filename": "spec.pdf", "id": "777", "content": "x"}
+s6c = render_style3([day(
+    "", mins=30, day_images=["e.png", file_meta],
+    day_comments=[{"id": "42", "author": "Vic Wu", "created_dt": None}],
+)])
+audit_images(s6c, "案例6c")
+seq6c = comment_seq(row_sequences(s6c))
+print(f"  6c = {seq6c}")
+check(seq6c[0] == ("text", f"└ 📝 {CAP}💬 留言 · Vic Wu"), f"[案例6c] 首段應為文字+留言連結，實得 {seq6c}")
+check(seq6c[1] == ("img", "wl_PBA-225_e.png"), f"[案例6c] 留言之後應為圖片，實得 {seq6c}")
+check(seq6c[-1] == ("text", "📎 spec.pdf"), f"[案例6c] 最後應為 📎 附件連結，實得 {seq6c}")
+check(s6c.find("a", href=re.compile(r"focusedCommentId=42")) is not None, "[案例6c] 💬 連結遺失")
+check(s6c.find("a", href=re.compile(r"attachmentId=777")) is not None, "[案例6c] 📎 連結遺失")
+
+# 6d：無圖片時 fallback 維持原樣
+for label, kwargs, expect in [
+    ("6d 有工時無圖", dict(mins=60), "(無填寫工作日誌)"),
+    ("6e 僅狀態改變", dict(mins=0, transition="🔄[進行中] ➜ ✅[完成]"), "(僅狀態改變)"),
+    ("6f 只有非圖片附件", dict(mins=0, day_images=[file_meta]), "(附件)"),
+    ("6g 什麼都沒有", dict(mins=0), "(無紀錄)"),
+]:
+    sx = render_style3([day("", **kwargs)])
+    txt = sx.get_text()
+    print(f"  {label}: {'OK' if expect in txt else 'MISSING'} / 含如圖={CAP in txt}")
+    check(expect in txt and CAP not in txt, f"[{label}] 應顯示 {expect} 且不含「{CAP}」")
+
+# 6h：整份輸出的圖片統計（block <ac:image> 數 == 獨立 <p> 數、無 inline）
+all_imgs = sum(len(x.find_all("ac:image")) for x in (s5, s5b, s6, s6b, s6c))
+print(f"  ac:image 總數 = {all_imgs}")
+check(all_imgs == 6, f"[案例6h] ac:image 總數應為 6，實得 {all_imgs}")
+
+
+# ============================================================
+hr("案例 7：style 2 也套用同樣規則")
+# ============================================================
+def render_style2(comment, day_images):
+    s = BeautifulSoup("", "html.parser")
+    log = {
+        "key": "PBA-225", "summary": "Demo", "status": "IN PROGRESS", "transition": "",
+        "project": "PBA", "parent": "NA", "label": "NA", "comment": comment,
+        "duration": "1h", "duedate": '"Due TBD"', "started_date": "2026-09-30",
+        "day_images": day_images,
+    }
+    s.append(m.generate_style_2_html(s, datetime(2026, 9, 30), [log], bg_color="#F5E6FF"))
+    m.promote_images_to_block_media(s, "225247361")
+    return s
+
+
+s7 = render_style2("[[IMG:f.png]]", [])
+audit_images(s7, "案例7a")
+body7 = s7.find("ac:rich-text-body")
+seq7 = block_summary(body7)
+print(f"  7a = {seq7}")
+idx7 = next(i for i, (k, v) in enumerate(seq7) if k == "text" and v.startswith("└ 📝"))
+check(seq7[idx7] == ("text", f"└ 📝 (1h) {CAP}") and seq7[idx7 + 1] == ("img", "wl_PBA-225_f.png"),
+      f"[案例7a] style2 純圖片備註不符，實得 {seq7}")
+s7b = render_style2("NA", ["c.png"])
+seq7b = block_summary(s7b.find("ac:rich-text-body"))
+print(f"  7b = {seq7b}")
+check(("text", f"└ 📝 (1h) {CAP}") in seq7b, f"[案例7b] style2 NA + 當日圖片應顯示「{CAP}」，實得 {seq7b}")
+
+
+# ============================================================
+hr("案例 8：成員名稱行 → <h3><strong><span>，可重複執行不巢狀")
+# ============================================================
+legacy = (
+    '<p local-id="aa">#Worklog</p>'
+    '<p style="margin-top: 20.0px;"><span style="background-color: rgb(255,248,230);font-weight: bold;'
+    'font-size: 120.0%;">@sam.chang</span></p>'
+    '<div class="daily-worklog-20261002"><p>body</p></div>'
+    '<h1><span style="background-color: rgb(245,230,255);">@Bob Lin</span></h1>'
+    '<p>@Bob Lin 不是名稱行</p>'
+    '<p><ac:link><ri:user ri:account-id="x" /></ac:link></p>'
+    '<p local-id="bb">#Worklog End<br /></p>'
+    '<p><span>@Vic Wu</span></p>'
+)
+s8 = BeautifulSoup(legacy, "html.parser")
+start8 = s8.find(string=re.compile(r"#Worklog\s*$")).parent
+end8 = s8.find(string=re.compile(r"#Worklog End\s*$")).parent
+n1 = m.normalize_member_names_in_region(s8, start8, end8)
+first = str(s8)
+n2 = m.normalize_member_names_in_region(s8, start8, end8)
+print(first)
+check(n1 == 2, f"[案例8] 第一次應改寫 2 行，實得 {n1}")
+check(n2 == 0 and str(s8) == first, "[案例8] 第二次執行不應再改動（非冪等）")
+h3s = s8.find_all("h3")
+check([h.get_text() for h in h3s] == ["@sam.chang", "@Bob Lin"], f"[案例8] h3 內容不符 {[h.get_text() for h in h3s]}")
+for h in h3s:
+    check(len(h.find_all("strong")) == 1 and not h.find("h3"), f"[案例8] {h.get_text()} 有巢狀 strong/heading")
+    check("font-size" not in str(h) and "font-weight" not in str(h), f"[案例8] {h.get_text()} 殘留 ADF 不支援的樣式")
+check("rgb(255,248,230)" in str(h3s[0]), "[案例8] 未沿用原本的背景色")
+check(s8.find("h1") is None, "[案例8] h1 名稱行沒有被標準化")
+check("<p>@Bob Lin 不是名稱行</p>" in first, "[案例8] 誤改了一般段落")
+check("<p><span>@Vic Wu</span></p>" in first, "[案例8] 改到了 #Worklog End 之後的內容")
+check(s8.find("ri:user") is not None and s8.find("ri:user").find_parent("p") is not None,
+      "[案例8] 真正的 mention 不應被改寫")
+
+built = m.build_member_name_heading(s8, "Vic Wu", m.USER_BG_COLORS["Vic Wu"])
+check(m.is_member_name_heading(built), "[案例8] build_member_name_heading 不是標準格式")
+check(m.normalize_member_name_block(s8, built) is built, "[案例8] 標準格式被重複包裝")
+
+# run_clear_logic 用 '@name' 文字找錨點：新格式仍可被找到，且它的下一個兄弟就是日誌區塊
+anchor = s8.find(string=re.compile("@sam.chang", re.I))
+container = anchor.find_parent(["p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "div"])
+check(container is not None and container.name == "h3", "[案例8] '@name' 錨點找不到 h3 容器")
+check(m.member_name_of_block(container) == "sam.chang", "[案例8] 錨點容器無法辨識為成員名稱行")
+
+# confluence_api2 的同名正規化（新週報建立時）結果需一致
+os.environ.setdefault("CONF_URL", "https://example.atlassian.net")
+import confluence_api2 as c2  # noqa: E402
+s8b = BeautifulSoup(legacy, "html.parser")
+c1 = c2.normalize_member_name_lines(s8b)
+c2_second = c2.normalize_member_name_lines(s8b)
+print(f"  confluence_api2: 第一次 {c1} 行、第二次 {c2_second} 行")
+check(c1 == 2 and c2_second == 0, f"[案例8] confluence_api2 正規化次數不符 {c1}/{c2_second}")
+check(str(s8b) == first, "[案例8] confluence_api2 與每日腳本的名稱行格式不一致")
+
+
 hr("結果")
 if failures:
     print("❌ 驗證失敗：")
     for f in failures:
         print("   - " + f)
     sys.exit(1)
-print("✅ 圖片皆為 block 層獨立 <p>、靠左、無 <a> 包裹；文字/圖片交錯順序保留；留言連結正確")
+print("✅ 圖片皆為 block 層獨立 <p>、靠左、無 <a> 包裹；文字/圖片交錯順序保留；留言連結正確；"
+      "純圖片備註顯示「worklog內容如圖」；成員名稱行為冪等的 <h3><strong>")

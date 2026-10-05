@@ -52,6 +52,71 @@ USER_BG_COLORS = {
     "SF Hsieh": "#E0F8EA"       # 綠色
 }
 
+# 成員名稱行：Cloud 的 storage→ADF 會丟掉 span 的 font-size／font-weight，
+# 只保留 heading、strong mark 與 backgroundColor mark，所以用 <h3><strong> 放大加粗。
+MEMBER_HEADING_TAG = "h3"
+_BG_COLOR_RE = re.compile(r"background-color\s*:\s*([^;]+)", re.I)
+
+
+def build_member_name_heading(soup, name, bg_color):
+    heading = soup.new_tag(MEMBER_HEADING_TAG, style="margin-top:20px; margin-bottom:10px;")
+    strong = soup.new_tag("strong")
+    span = soup.new_tag(
+        "span",
+        style=f"background-color:{bg_color}; padding:3px 8px; border-radius:4px; border:1px solid #7f8c8d;",
+    )
+    span.string = f"@{name}"
+    strong.append(span)
+    heading.append(strong)
+    return heading
+
+
+def member_name_of_block(block):
+    """block 的可見文字恰為「@成員」（純文字，不含 ac:link mention）時回傳成員名稱。"""
+    if not isinstance(block, Tag) or block.name not in ("p", "h1", "h2", "h3", "h4", "h5", "h6"):
+        return None
+    if block.find("ac:link"):
+        return None
+    text = (block.get_text() or "").replace("\u00a0", " ").strip()
+    return next((n for n in USER_BG_COLORS if text == f"@{n}"), None)
+
+
+def is_member_name_heading(block):
+    if member_name_of_block(block) is None or block.name != MEMBER_HEADING_TAG:
+        return False
+    strongs = block.find_all("strong")
+    return len(strongs) == 1 and strongs[0].parent is block and strongs[0].find("span") is not None
+
+
+def normalize_member_name_block(soup, block):
+    """把舊格式的成員名稱行改寫成標準 heading；已是標準格式則原樣回傳（可重複執行不會巢狀）。"""
+    name = member_name_of_block(block)
+    if name is None or is_member_name_heading(block):
+        return block
+    bg_color = USER_BG_COLORS.get(name, "#ffffff")
+    for tag in block.find_all(style=True):
+        m = _BG_COLOR_RE.search(tag.get("style") or "")
+        if m:
+            bg_color = m.group(1).strip()
+            break
+    heading = build_member_name_heading(soup, name, bg_color)
+    block.replace_with(heading)
+    return heading
+
+
+def normalize_member_names_in_region(soup, start_element, end_element):
+    """#Worklog ～ #Worklog End 之間的成員名稱行一律改成標準 heading，回傳改寫數量。"""
+    if start_element is None:
+        return 0
+    changed = 0
+    node = start_element.next_sibling
+    while node is not None and node is not end_element:
+        nxt = node.next_sibling
+        if normalize_member_name_block(soup, node) is not node:
+            changed += 1
+        node = nxt
+    return changed
+
 # ✅ 台灣國定假日與補班日設定
 TW_HOLIDAYS = {
     "2024-01-01", "2024-02-08", "2024-02-09", "2024-02-12", "2024-02-13", "2024-02-14", "2024-02-28", "2024-04-04", "2024-04-05", "2024-06-10", "2024-09-17", "2024-10-10",
@@ -108,6 +173,7 @@ SETTINGS = SettingsManager()
 
 # Worklog 圖片標記：GUI 寫入 [[IMG:檔名]]，同步到 Confluence 時嵌入
 IMG_MARKER_RE = re.compile(r'\[\[IMG:([^\]]+?)\]\]', re.IGNORECASE)
+IMAGE_ONLY_COMMENT_TEXT = "worklog內容如圖"
 PENDING_CONF_IMAGES = []  # {issue_key, jira_filename, conf_filename}
 _CURRENT_CONF_PAGE_ID = None  # run_sync_logic 解析週報頁後設定，供圖片連結用
 
@@ -169,6 +235,26 @@ def _apply_newline_delimiters(text):
         else:
             rebuilt.append(f"[[IMG:{chunk}]]")
     return "".join(rebuilt)
+
+
+def comment_has_no_text(comment):
+    """拿掉 [[IMG:]] 與多筆 worklog 合併時的 ' / ' 分隔後，沒有任何可見文字。"""
+    rest = IMG_MARKER_RE.sub("", comment or "")
+    return not re.sub(r"[\s/]+", "", rest)
+
+
+def caption_image_only_comment(comment):
+    """備註只有圖片標記時，在圖片前補上「worklog內容如圖」；其他情況原樣回傳。"""
+    markers = [m.strip() for m in IMG_MARKER_RE.findall(comment or "")]
+    if not markers or not any(is_image_filename(m) for m in markers):
+        return comment
+    if not comment_has_no_text(comment):
+        return comment
+    return "\n".join([IMAGE_ONLY_COMMENT_TEXT] + [f"[[IMG:{m}]]" for m in markers])
+
+
+def has_image_entry(entries):
+    return any(is_image_filename(attachment_entry_filename(e)) for e in entries or [])
 
 
 def _invisible_hang_indent(left_gutter="--------", hang_prefix="└ 📝 "):
@@ -1673,15 +1759,6 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
             comment_text = log['comment']
             comment_prefix = f"└ 📝 {dur_text}"
             p3.append(soup.new_string(comment_prefix))
-            if comment_text:
-                append_wysiwyg_comment(
-                    soup, p3, comment_text,
-                    color_style="color: #555555;",
-                    issue_key=log.get('key'),
-                    bg_color=bg_color,
-                    hang_prefix=comment_prefix,
-                    left_gutter="--------",
-                )
             day_str = log.get("started_date") or ""
             exclude_imgs = [m.strip() for m in IMG_MARKER_RE.findall(comment_text or "")]
             # style2：若 log 未附 day_images，當場依 started_date 與 issue 附件補上
@@ -1706,6 +1783,20 @@ def generate_style_2_html(soup, target_date, logs, pending_in_progress=None, pen
                     day_imgs = imgs + files
                 except Exception:
                     day_imgs = []
+            # extract_logs_from_issues 把空備註記成 "NA"
+            if comment_text in ("", "NA") and has_image_entry(day_imgs):
+                comment_text = IMAGE_ONLY_COMMENT_TEXT
+            else:
+                comment_text = caption_image_only_comment(comment_text)
+            if comment_text:
+                append_wysiwyg_comment(
+                    soup, p3, comment_text,
+                    color_style="color: #555555;",
+                    issue_key=log.get('key'),
+                    bg_color=bg_color,
+                    hang_prefix=comment_prefix,
+                    left_gutter="--------",
+                )
             append_day_attachment_images(
                 soup, p3, log.get("key"), day_imgs or [],
                 color_style="color: #555555;", bg_color=bg_color,
@@ -1964,18 +2055,17 @@ def generate_style_3_html(soup, target_date, selected_dates, daily_aggregated_lo
                 comment_prefix = "└ 📝 "
                 p_comment.append(soup.new_string(comment_prefix))
                 
-                comment_text = d_info['comment']
+                comment_text = caption_image_only_comment(d_info['comment'])
                 day_imgs = d_info.get("day_images") or []
                 if not comment_text:
-                    if d_info.get('total_mins_day', 0) > 0:
+                    if has_image_entry(day_imgs):
+                        comment_text = IMAGE_ONLY_COMMENT_TEXT
+                    elif d_info.get('total_mins_day', 0) > 0:
                         comment_text = "(無填寫工作日誌)"
                     elif d_info.get('transition'):
                         comment_text = "(僅狀態改變)"
                     elif day_imgs:
-                        if all(is_image_filename(attachment_entry_filename(fn)) for fn in day_imgs):
-                            comment_text = "(附件圖片)"
-                        else:
-                            comment_text = "(附件)"
+                        comment_text = "(附件)"
                     else:
                         comment_text = "(無紀錄)"
                     comment_span = soup.new_tag("span", style=color_style)
@@ -2191,7 +2281,13 @@ def run_clear_logic():
             mention_container = target_mention.find_parent(['p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div'])
             if not mention_container: mention_container = target_mention
 
-            if isinstance(mention_container, Tag) and mention_container.name in ['p', 'div', 'li', 'h2', 'h3', 'h4', 'h5', 'h6']:
+            if member_name_of_block(mention_container):
+                # 本腳本產生的純文字名稱行維持 h3 標準格式，不要被改成 h1
+                normalized = normalize_member_name_block(soup, mention_container)
+                if normalized is not mention_container:
+                    mention_container = normalized
+                    page_needs_update = True
+            elif isinstance(mention_container, Tag) and mention_container.name in ['p', 'div', 'li', 'h2', 'h3', 'h4', 'h5', 'h6']:
                 mention_container.name = 'h1'
                 page_needs_update = True
 
@@ -2505,10 +2601,7 @@ def run_sync_logic():
                 pending_resume = [p for p in pending_resume if p.get('duedate_dt') is not None]
 
             # 建立人名標題
-            p_user = soup.new_tag("p", style="margin-top:20px; margin-bottom:10px;")
-            span_user = soup.new_tag("span", style=f"background-color:{user_bg_color}; font-weight:bold; font-size:120%; padding:3px 8px; border-radius:4px; border:1px solid #7f8c8d;")
-            span_user.string = f"@{name}"
-            p_user.append(span_user)
+            p_user = build_member_name_heading(soup, name, user_bg_color)
 
             if daily_aggregated_logs or logs:
                 if SETTINGS.get("style_weekly") and daily_aggregated_logs:
@@ -2527,6 +2620,12 @@ def run_sync_logic():
         # 最後將排好順序的整包 combined_soup 一次性安插在 #Worklog 正下方
         if page_needs_update and start_marker:
             start_element.insert_after(combined_soup)
+
+        if start_marker and end_marker:
+            renamed = normalize_member_names_in_region(soup, start_element, end_element)
+            if renamed:
+                page_needs_update = True
+                print(f"  └ 🔤 已將 {renamed} 個成員名稱行改為放大加粗標題")
 
         if page_needs_update:
             print(f"\n💾 發現頁面有變動，正在將最終結果儲存至 Confluence...")
