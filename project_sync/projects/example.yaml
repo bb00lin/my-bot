@@ -1,0 +1,63 @@
+project:
+  name: Example Project
+  slug: example
+  customer: ''
+  project_start: ''
+atlassian:
+  site_url: https://qsiaiot.atlassian.net
+  cloud_id: 2657b5c5-bbc7-4469-9e06-6bc58db3de73
+  email: bob.lin@qsitw.com
+  silent_mode: true
+jira:
+  project_key: ''
+  epic_issue_type: 大型工作
+  task_issue_type: 任務
+  start_date_field: customfield_10015
+  due_date_field: duedate
+  default_assignee_account_id: ''
+  default_assignee_query: ''
+  board_url: ''
+register:
+  enabled: false
+  sheet_url: ''
+  sheet_name: Register
+  confluence_page_id: ''
+  confluence_page_title: mail_checking
+  space_key: ''
+  source_link_title: Open Issues Register (S 表格)
+  version_message: Synced from register
+  confluence_columns:
+  - ID
+  - Workstream
+  - Title
+  - Description / current state
+  - Next action
+  - Ball with
+  - Priority
+  - Status
+  - Opened
+  - Target close
+  - Next milestone / due
+  - Source / reference
+  - LINK
+plan:
+  enabled: true
+  source: xlsx
+  xlsx_path: projects/example/EXAMPLE_Project_Plan.xlsx
+  google_sheet_url: ''
+  label: example-plan
+  id_prefix: PLN
+  t0_task_id: ''
+  on_removed: close
+  confluence_space_key: ''
+  confluence_space_id: ''
+  confluence_parent_page_id: ''
+  confluence_page_title: EXAMPLE Project Plan
+  confluence_page_id: ''
+  show_discussion_on_confluence: true
+  share_with: []
+mail:
+  to: ''
+  cc: []
+  send_on_real_run: true
+  backend: smtp

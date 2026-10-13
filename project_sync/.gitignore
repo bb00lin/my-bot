@@ -1,0 +1,9 @@
+.env
+*.env
+secrets/
+*service_account*.json
+logs/
+projects/*/
+__pycache__/
+*.pyc
+~$*.xlsx
