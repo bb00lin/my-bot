@@ -21,6 +21,7 @@
 | `BOM Automation Logic` | `bom_action.yml` | `bom_manager.py` | 僅手動，下拉選單選模式 |
 | `Run STM32 GPIO Planner` | `RunSTM_GPIO.yml` | `stm32_dashboard.py` | 手動 + push（限 `stm32_dashboard.py` / `STM32MP133CAFx.xml` 變更） |
 | `Sync Register` | `sync-register.yml` | `sync_register.py` | 手動 + `repository_dispatch` (`sync-register`) |
+| `Sync Plan` | `sync-plan.yml` | `sync_plan.py`（種子資料 `plan_seed_c27.py`，見 `SYNC_PLAN.md`） | 手動（direction / dry_run / mode）+ `repository_dispatch` (`sync-plan`) |
 | `worklog_to_confluence (Auto Sync)` | `worklog_to_confluence.yml` | `daily_worklog_to_confluence.py` | 手動 + 排程 |
 | `Confluence Weekly2 Report` | `Confluence Weekly2 Report.yml` | `confluence_api2.py` | 手動 + 排程 |
 | `Monthly Confluence Task` | `monthly_confluence.yml` | `monthly_confluence_copy.py` | 手動 + 排程 |
@@ -62,6 +63,7 @@ python DailyStockBot.py --stage push   # 只跑 AI 戰略推播，讀 WATCH_LIST
 | `test_stock_pipeline_metrics_verify.py` | `DailyStockBot.py` 的指標、階段路由、Sheets 讀寫 | `pandas` |
 | `test_daily_stock_workflow_verify.py` | `main.yml` 結構與 `resolve_daily_stock_plan.py` | `PyYAML` |
 | `test_unit_verify.py` | `sync_register.py` | `PyYAML` |
+| `test_sync_plan_verify.py` | `sync_plan.py`（前置任務解析、排程、雙向合併）與 Register 防誤刪 | `PyYAML`、`requests`、`openpyxl` |
 | `scripts/test_block_media_local.py` | `daily_worklog_to_confluence.py` 的 Confluence 排版 | `beautifulsoup4` |
 
 手法是「假環境變數 + 把需要網路的第三方模組換成假模組後 import，再 monkeypatch」。

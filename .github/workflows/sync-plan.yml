@@ -1,0 +1,110 @@
+# C27 Project Plan：Google Sheet <-> Jira PMWC（雙向）-> Confluence「C27 Project Plan」
+# 僅手動觸發：workflow_dispatch / repository_dispatch（無 cron 自動排程）
+name: Sync Plan
+
+on:
+  workflow_dispatch:
+    inputs:
+      direction:
+        description: "同步方向：both = 先拉 Jira 變更再推送；push = 只推 Sheet→Jira；pull = 只拉 Jira→Sheet"
+        type: choice
+        options: [both, push, pull]
+        default: both
+      dry_run:
+        description: "只預覽，不寫入 Sheet / Jira / Confluence"
+        type: boolean
+        default: false
+      mode:
+        description: "sync = 一般同步；init-sheet = 建立/初始化 Google Sheet（已有資料時不覆蓋）"
+        type: choice
+        options: [sync, init-sheet]
+        default: sync
+      allow_mass_removal:
+        description: "允許一次關閉大量計畫單（超過 max_removals）"
+        type: boolean
+        default: false
+  repository_dispatch:
+    types: [sync-plan]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-plan
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-plan.txt
+
+      - name: Restore plan state cache
+        uses: actions/cache@v4
+        with:
+          path: .plan_cache
+          key: plan-state-${{ github.repository }}-${{ github.run_id }}
+          restore-keys: |
+            plan-state-${{ github.repository }}-
+
+      - name: Prepare config
+        env:
+          CONFIG_YAML: ${{ secrets.CONFIG_YAML }}
+          PLAN_CONFIG_YAML: ${{ secrets.PLAN_CONFIG_YAML }}
+          ATLASSIAN_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
+        run: |
+          if [ -n "$CONFIG_YAML" ]; then
+            printf '%s\n' "$CONFIG_YAML" > config.yaml
+          fi
+          if [ -n "$PLAN_CONFIG_YAML" ]; then
+            printf '%s\n' "$PLAN_CONFIG_YAML" > plan_config.yaml
+            echo "Wrote plan_config.yaml from PLAN_CONFIG_YAML secret."
+          else
+            echo "::warning::未設定 PLAN_CONFIG_YAML，改用 CONFIG_YAML 的 plan: 區塊與程式預設值。"
+          fi
+          if [ -z "$ATLASSIAN_API_TOKEN" ]; then
+            echo "::error::缺少 Secret ATLASSIAN_API_TOKEN"
+            exit 1
+          fi
+          echo "ATLASSIAN_API_TOKEN=$ATLASSIAN_API_TOKEN" > .env
+
+      - name: Run sync_plan.py
+        env:
+          GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          DIRECTION: ${{ github.event.inputs.direction || github.event.client_payload.direction || 'both' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || github.event.client_payload.dry_run || 'false' }}
+          MODE: ${{ github.event.inputs.mode || github.event.client_payload.mode || 'sync' }}
+          MASS: ${{ github.event.inputs.allow_mass_removal || 'false' }}
+        run: |
+          if [ "$MODE" = "init-sheet" ]; then
+            python sync_plan.py --init-sheet
+            exit $?
+          fi
+          ARGS="--direction $DIRECTION"
+          if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ "$MASS" = "true" ]; then ARGS="$ARGS --allow-mass-removal"; fi
+          echo "python sync_plan.py $ARGS"
+          python sync_plan.py $ARGS
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan-sync-${{ github.run_id }}
+          path: logs/plan_sync_latest.txt
+          if-no-files-found: ignore
+          retention-days: 30

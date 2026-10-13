@@ -39,6 +39,9 @@ CONFLUENCE_JIRA_LINK_RE = re.compile(
 )
 # S 表重複 Register ID 時，Jira summary 最前方標記（格式：ID重複 {ID}_{Title}）
 DUPLICATE_ID_SUMMARY_PREFIX = "ID重複"
+# 其他工具（sync_plan.py）管理的單：Register 同步不得索引、更新或刪除
+DEFAULT_EXCLUDE_LABELS: tuple[str, ...] = ("c27-plan",)
+PLAN_SUMMARY_PREFIX = "PLN-"
 
 S_COLUMNS = [
     "ID",
@@ -2414,24 +2417,45 @@ def _issue_key_sort_tuple(key: str) -> tuple[str, int]:
     return text, 0
 
 
+def is_non_register_issue(
+    fields: dict[str, Any], exclude_labels: tuple[str, ...] | list[str] = DEFAULT_EXCLUDE_LABELS
+) -> bool:
+    """計畫同步（sync_plan.py）等其他工具的單：帶排除 label 或 summary 以 PLN- 開頭。
+
+    這類單絕不可進入 Register 索引，否則會被當成「S 表已刪除」而被刪掉。
+    """
+    excluded = {str(x).strip().casefold() for x in exclude_labels if str(x).strip()}
+    labels = {str(x).strip().casefold() for x in (fields.get("labels") or [])}
+    if excluded & labels:
+        return True
+    summary = strip_duplicate_id_summary_prefix(str(fields.get("summary") or "")).upper()
+    return summary.startswith(PLAN_SUMMARY_PREFIX)
+
+
 def load_jira_register_index(
-    client: AtlassianClient, project_key: str, task_type: str
+    client: AtlassianClient,
+    project_key: str,
+    task_type: str,
+    exclude_labels: tuple[str, ...] | list[str] = DEFAULT_EXCLUDE_LABELS,
 ) -> dict[str, dict[str, Any]]:
     """register_id -> {key, status, parent}
 
     若多筆任務 summary 對到同一 Register ID，保留 **較舊** 的 key（數字較小），
     避免後建的重複單覆寫索引後繼續更新幽靈副本。
+    計畫單（label c27-plan 或 PLN- 前綴）一律排除，不會被刪除或更新。
     """
     index: dict[str, dict[str, Any]] = {}
     issues: list[dict[str, Any]] = []
     for type_name in jql_issuetype_name_candidates(task_type):
         jql = f"project = {project_key} AND {jql_issuetype_equals(type_name)}"
         issues = _paginate_jira_search(
-            client, jql, fields=["summary", "status", "parent"]
+            client, jql, fields=["summary", "status", "parent", "labels"]
         )
         if issues:
             break
     for issue in issues:
+        if is_non_register_issue(issue["fields"], exclude_labels):
+            continue
         rid = parse_register_id_from_summary(issue["fields"]["summary"])
         if not rid:
             continue
@@ -2495,10 +2519,14 @@ def find_jira_key_by_register_id(
         for extra in jql_extra_candidates:
             jql = f"project = {project_key} AND {type_clause} AND {extra}"
             try:
-                data = client.jira_search(jql, max_results=50, fields=["summary"])
+                data = client.jira_search(
+                    jql, max_results=50, fields=["summary", "labels"]
+                )
             except Exception:
                 continue
             for issue in data.get("issues", []):
+                if is_non_register_issue(issue["fields"]):
+                    continue
                 parsed = parse_register_id_from_summary(issue["fields"]["summary"])
                 if parsed == rid:
                     key = issue["key"]
@@ -2605,7 +2633,12 @@ def sync_jira_for_rows(
     )
 
     epic_map = load_epic_map(client, project, epic_type)
-    issue_index = load_jira_register_index(client, project, task_type)
+    exclude_labels = tuple(
+        cfg["jira"].get("exclude_labels") or DEFAULT_EXCLUDE_LABELS
+    )
+    issue_index = load_jira_register_index(
+        client, project, task_type, exclude_labels=exclude_labels
+    )
 
     current_ids = {r.register_id for r in rows}
     id_to_key: dict[str, str] = dict(existing_jira_map)

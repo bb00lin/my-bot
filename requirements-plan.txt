@@ -1,0 +1,3 @@
+-r requirements-sync.txt
+gspread>=6.0
+google-auth>=2.20
