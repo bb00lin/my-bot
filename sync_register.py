@@ -39,7 +39,7 @@ CONFLUENCE_JIRA_LINK_RE = re.compile(
 )
 # S 表重複 Register ID 時，Jira summary 最前方標記（格式：ID重複 {ID}_{Title}）
 DUPLICATE_ID_SUMMARY_PREFIX = "ID重複"
-# 其他工具（sync_plan.py）管理的單：Register 同步不得索引、更新或刪除
+# 排程同步（本機 ProjectSync）管理的單：Register 同步不得索引、更新或刪除
 DEFAULT_EXCLUDE_LABELS: tuple[str, ...] = ("c27-plan",)
 PLAN_SUMMARY_PREFIX = "PLN-"
 
@@ -2420,13 +2420,15 @@ def _issue_key_sort_tuple(key: str) -> tuple[str, int]:
 def is_non_register_issue(
     fields: dict[str, Any], exclude_labels: tuple[str, ...] | list[str] = DEFAULT_EXCLUDE_LABELS
 ) -> bool:
-    """計畫同步（sync_plan.py）等其他工具的單：帶排除 label 或 summary 以 PLN- 開頭。
+    """排程同步等其他工具的單：帶排除 label、任何 *-plan / *-plan-* label，或 summary 以 PLN- 開頭。
 
     這類單絕不可進入 Register 索引，否則會被當成「S 表已刪除」而被刪掉。
     """
     excluded = {str(x).strip().casefold() for x in exclude_labels if str(x).strip()}
     labels = {str(x).strip().casefold() for x in (fields.get("labels") or [])}
     if excluded & labels:
+        return True
+    if any(lb.endswith("-plan") or "-plan-" in lb for lb in labels):
         return True
     summary = strip_duplicate_id_summary_prefix(str(fields.get("summary") or "")).upper()
     return summary.startswith(PLAN_SUMMARY_PREFIX)
@@ -2442,7 +2444,7 @@ def load_jira_register_index(
 
     若多筆任務 summary 對到同一 Register ID，保留 **較舊** 的 key（數字較小），
     避免後建的重複單覆寫索引後繼續更新幽靈副本。
-    計畫單（label c27-plan 或 PLN- 前綴）一律排除，不會被刪除或更新。
+    計畫單（*-plan label 或 PLN- 前綴）一律排除，不會被刪除或更新。
     """
     index: dict[str, dict[str, Any]] = {}
     issues: list[dict[str, Any]] = []

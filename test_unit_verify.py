@@ -1487,6 +1487,26 @@ def main() -> int:
 
 
 
+    # Register 防誤刪：排程同步的單（*-plan label 或 PLN- 前綴）不進 Register 索引
+    class _FakeSearch:
+        def __init__(self, issues):
+            self.issues = issues
+
+        def jira_search(self, jql, *, max_results=100, fields=None, next_page_token=None):
+            return {"issues": [dict(i) for i in self.issues], "isLast": True}
+
+    guard_issues = [
+        {"key": "PMWC-10", "fields": {"summary": "RF-03_XO trim", "status": {"name": "x"}, "labels": []}},
+        {"key": "PMWC-11", "fields": {"summary": "AT-01_plan", "status": {"name": "x"}, "labels": ["c27-plan"]}},
+        {"key": "PMWC-12", "fields": {"summary": "PLN-01_plan", "status": {"name": "x"}, "labels": []}},
+        {"key": "PMWC-13", "fields": {"summary": "BT-02_plan", "status": {"name": "x"}, "labels": ["c28-plan-bt"]}},
+        {"key": "PMWC-14", "fields": {"summary": "EVT2-01_DOE", "status": {"name": "x"}, "labels": ["other"]}},
+    ]
+    guard_index = sr.load_jira_register_index(_FakeSearch(guard_issues), "PMWC", "Task")
+    check("Register 防誤刪：c27-plan / *-plan-* / PLN- 單不進索引",
+          set(guard_index) == {"RF-03", "EVT2-01"}, str(sorted(guard_index)))
+    check("Register 防誤刪：PLN-AT-01 不符合 Register ID", not sr.parse_register_id_from_summary("PLN-AT-01_x"))
+
     print("\n" + "=" * 60)
 
     print(f"結果: {PASS} PASS, {FAIL} FAIL")
