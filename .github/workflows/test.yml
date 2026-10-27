@@ -16,7 +16,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.9'
+        python-version: '3.11'
 
     # 3. 安裝套件 (注意這裡多安裝了 beautifulsoup4 和 lxml)
     - name: Install dependencies

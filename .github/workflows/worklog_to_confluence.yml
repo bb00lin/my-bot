@@ -28,7 +28,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.9'
+        python-version: '3.11'
 
     # 3. 安裝套件
     - name: Install dependencies
@@ -69,6 +69,11 @@ jobs:
         to: bb00lin@gmail.com
         from: GitHub Automation <${{ secrets.MAIL_USERNAME }}>
         body: file://output.txt
+
+    - name: Ensure failure log exists
+      if: failure()
+      run: |
+        [ -s output.txt ] || echo "腳本未執行或沒有輸出，請查看 Actions log：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > output.txt
 
     # 6. 發送失敗信件 [Fail] (✅ 升級：改用 v4，並自動附上出錯的 Python 原始 Log)
     - name: Send Failure Email
