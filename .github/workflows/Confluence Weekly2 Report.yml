@@ -1,10 +1,10 @@
 name: Confluence Weekly2 Report
 
 on:
-  workflow_dispatch: # 允許手動按鈕觸發
+  workflow_dispatch:
   schedule:
-    # 台灣時間週日 16:00 = UTC 時間週日 08:00
-    - cron: '0 8 * * 0'
+    # 台灣時間週一 21:00 = UTC 時間 13:00
+    - cron: '0 13 * * 1'
 
 jobs:
   build:
